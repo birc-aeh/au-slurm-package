@@ -1,0 +1,148 @@
+#!/bin/bash
+
+verbose=N
+boottime=N
+use_reason_format=N
+
+report() {
+    str="`date +'%d-%b-%Y %H:%M'` $@"
+    [ $use_reason_format == "N" -a "$verbose" == "Y" ] && echo `hostname -s` $str
+    [ $use_reason_format == "Y" -a "$verbose" == "Y" ] && echo $@
+}
+
+# Parse arguments
+while getopts "vbr" opt ; do
+    case "$opt" in
+        v) verbose=Y ;;
+        b) boottime=Y ;;
+        r) use_reason_format=Y
+        verbose=Y
+        ;;
+    esac
+done
+
+# Check that the munge executable is present
+if [ ! -x /opt/munge/bin/munge ] ; then
+    report 'Munge not installed'
+    exit 1
+fi
+
+# Check that a slurm executable is present
+if [ ! -x /opt/slurm/bin/srun ] ; then
+    report 'Slurm not installed'
+    exit 1
+fi
+
+# On boot time munge & slurm are not running as we are deciding if we should
+# start them
+if [ $boottime == 'N' ] ; then
+
+    # Make sure that munge is not just present, but actually runs
+    munge_works=N
+    if pgrep -u munge munged > /dev/null && /opt/munge/bin/munge -n > /dev/null ; then
+        munge_works=Y
+    fi
+    if [ "$munge_works" == "N" ] ; then
+        report "Munge doesn't work"
+        exit 1
+    fi
+
+    slurm_runnig=N
+    if pgrep -u root slurmd > /dev/null ; then
+        slurm_runnig=Y
+    fi
+    if [ "$slurm_runnig" == "N" ] ; then
+        report "Slurm isn't running"
+        exit 1
+    fi
+
+fi
+
+
+# Catch errors like these from 'dmesg':
+# EXT2-fs error (device md0): ext2_free_branches: Read failure, inode=34947074, block=70063936
+# SCSI error : <1 0 0 0> return code = 0x40000
+# end_request: I/O error, dev sdb, sector 341714794
+if dmesg | egrep 'I/O error, dev sd[ab]' >/dev/null 2>&1 ; then
+  report "Diskerror1"
+  exit 1
+fi
+
+# Catch errors like these from 'dmesg':
+# EXT2-fs error (device md0): ext2_free_branches: Read failure, inode=48005127, block=96011847
+# Buffer I/O error on device md0, logical block 51079787
+# lost page write due to I/O error on md0
+if dmesg | egrep 'Buffer I/O error on device' >/dev/null 2>&1 ; then
+  report "Diskerror2"
+  exit 1 
+fi
+
+# Catch errors related to missing physical memory
+mem=`free | awk '/^Mem/{print $2}'`
+nodekind=`hostname -s | sed 's/n..$//'`
+if echo $nodekind | egrep -q '^s[0-9][0-9]$' ; then
+  lostmem=0
+  case $nodekind in
+  s01|s02)     # HP SL230s G8 nodes, 64 GB
+               [ $mem -lt 65000000 ] && lostmem=1
+               ;;
+  s03)         # HP SL230s G8 nodes, 128 GB
+               [ $mem -lt 130000000 ] && lostmem=1
+               ;;
+  s08)         # HP DL585 G7 node, 512 GB
+               [ $mem -lt 520000000 ] && lostmem=1
+               ;;
+  s09)         # HP DL580 G7 node, 1024 GB
+               [ $mem -lt 1000000000 ] && lostmem=1
+               ;;
+  *)           ;;
+  esac
+
+  if [ $lostmem == 1 ]; then
+    report 'Lost part of memory'
+    exit 1
+  fi
+fi
+
+
+# Check /scratch and / for free space
+AVAILBLOCKS=(`df /scratch`)
+if [ $? -ne 0 -o ${AVAILBLOCKS[10]} -le 104857600 ] ; then
+    report 'not enough space on /scratch - less than 100G'
+    exit 1
+fi
+AVAILBLOCKS=(`df /`)
+if [ $? -ne 0 -o ${AVAILBLOCKS[10]} -le 1048576 ] ; then
+    report 'not enough space on / - less than 1G'
+    exit 1
+fi
+
+# Check that /faststorage is mounted.
+# Avoid use of 'df' as it occasionally hangs.
+if [ ! -d /faststorage/home ]; then
+  report '/faststorage not available'
+  exit 1
+fi
+
+# Check connectivity by sending ICMP pings to two hosts.
+CHKHOSTS="gfs1 gfs3 gfs4 gfs5"
+failed_nfs_hosts=0
+for fs in $CHKHOSTS ; do
+  /usr/sbin/rpcinfo -T udp $fs nfs 4 >/dev/null 2>&1 
+  if [ $? -ne 0 ] ; then
+      report "$fs not running nfs"
+      exit 1
+  fi
+done 
+
+for i in 1 2 3 4 5 6 7 8 ; do
+    AVAILBLOCKS=(`df /project/TestHome$i`)
+    if [ $? -ne 0 -o "${AVAILBLOCKS[11]}" == "100%" ] ; then
+        report "home$i is full"
+        exit 1
+    fi
+done
+
+# All ok
+exit 0
+

@@ -1,0 +1,9 @@
+#!/bin/sh
+NTASKS=`printenv SLURM_NTASKS`
+PROCID=`printenv SLURM_PROCID`
+# Starting from procid take every ntasks'th line, and eval it
+sed -n "$PROCID~${NTASKS}p" $1 | \
+while read line
+do
+    eval $line
+done

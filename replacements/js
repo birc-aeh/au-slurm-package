@@ -1,0 +1,95 @@
+#!/usr/bin/perl
+
+%order = ('R' => 100, 'S' => 80, 'Q' => 50, 'H' => 20);
+
+$i=0;
+while ($ARGV[$i]) {
+  if ($ARGV[$i] eq "-r") {
+    $runningonly = 1;
+  }
+  
+  elsif ($ARGV[$i] eq "-n") {
+    $nonodes = 1;
+  }
+
+  elsif ($ARGV[$i] eq "-g") { 
+    $dogroups = 1;
+    $i++;
+    push(@groups, $ARGV[$i]) if ($ARGV[$i] && $ARGV[$i] !~ /^-/);
+  }
+
+  elsif ($ARGV[$i] eq "-gu") {
+    $dogroups = 1;
+    $i++;
+    if ($ARGV[$i] && $ARGV[$i] !~ /^-/) {
+      @pw = getpwnam $ARGV[$i]; 
+      push(@groups, $pw[3]);
+    }
+  }
+
+  else {
+    push(@myargs, $ARGV[$i]);
+  }
+
+  $i++;
+}
+
+$grepafter = (@myargs ? join('|', @myargs) : '.');
+$allgroups = join(',', @groups);
+@groups = split(/,/, $allgroups);
+for $g (@groups) {
+  $grpent=`getent group $g`;
+  @x = split(/:/, $grpent);
+  push(@gids, $x[2]);
+}
+
+open(QS,"squeue --noheader '--format=%A;%u;%P;%j;--;%D;%c;%m;%l;%t;%M;%N;%E;' |") || die "js: squeue returned with error%n";
+
+$head = <<EOF;
+                                                                        Alloc
+Job ID           Username Queue    Jobname    SessID NDS  S Elap Time   nodes
+---------------- -------- -------- ---------- ------ ---  - ----------  -----
+EOF
+@HEADER = split(/\n/, $head);
+map(s/^(.{65}).*/\1/, @HEADER) if $nonodes == 1;
+print join("\n", @HEADER), "\n";
+
+while(<QS>) {
+    chomp;
+    next unless /^\d+/;
+    @a = split(/;/, $_);
+    next if ($runningonly == 1 &&  $a[9] ne 'R');
+    if ($a[12]) {
+        $a[9] = 'H';
+    }
+    if ($dogroups == 1) { 
+      @pw = getpwnam $a[1];
+      next if ! grep (/^$pw[3]$/, @gids);
+    }
+    $jid = $a[0];
+    $a[5] = "1" if  $a[5] eq '--';
+    $line{$jid} = sprintf("%-16s %-8s %-8s %-10.10s %6s %3s  %1s %5s  %s\n",
+       $a[0],  $a[1],  $a[2],  $a[3],  $a[4], $a[5], $a[9], $a[10], $a[11]);  
+    $status{$jid} = $a[9];
+}
+close(QS);
+
+@jids = sort byncwh keys %line;
+for $jid (@jids) {
+    if ($line{$jid} =~ /$grepafter/i) {
+        $line{$jid} =~ s/^(.{65}).*/\1/ if $nonodes == 1;
+        print $line{$jid};
+    }
+}
+
+#
+sub byncwh {
+    if ($status{$a} eq $status{$b}) {
+	$a <=> $b;
+    }
+    else {
+	$order{$status{$b}} <=> $order{$status{$a}};
+    }
+}
+#
+

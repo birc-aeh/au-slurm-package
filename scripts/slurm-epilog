@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# bash-multi-login-update deletes the users /tmp files when they have no more
+# jobs running, so we just have to delete the job specific folders.
+/usr/local/sbin/bash-login-update -r $SLURM_JOB_UID
+
+find /scratch/$SLURM_JOBID -delete
+find /scratch/fhgfs_$SLURM_JOBID -delete
+
+if [ -x /com/sbin/slurm-sanity-check ]; then
+    reason=`/com/sbin/slurm-sanity-check -r -v`
+    sane=$?
+    if [ $sane -ne 0 ] ; then
+        /opt/slurm/bin/scontrol update NodeName=`hostname -s` State=DRAIN Reason="$reason"
+        exit 0
+    fi
+fi

@@ -1,0 +1,365 @@
+#!/usr/bin/env python
+"""
+A fast parallel SSH with output for simple parsing.
+
+The goal is to make it trustworthy for automatic system administration tasks and output results in a format which is easy to parse.
+
+Features to ease parsing
+ - Every written line includes hostname and returncode for command. Search for commands with returncode != 0 to detect faults.
+ - For every command executed, at least one line is written to stdout. In case the command outputs nothing:
+        1/1  s03n11         0  
+
+Main features:
+ - Does unordered parallel execution
+ - Set timeout for connection and commands. Retrieve output for failed executions.
+ - Set maximum size of thread pool
+ - Accepts filename with hosts or list of nodes
+ - Use regexp to select set of nodes from list of nodes
+ - Supports only SSH with the use of password-less logins
+ - Provides continuesly updated status of all current connections
+ - No streaming output from executions, but partial output on timeouts
+ - Outputs stderr to stderr and stdout to stdout
+
+Outputs:
+
+Hostname output from host
+  1/10    s01n11    0    s01n11.genomedk.net
+
+No output from host
+  1/10    s01n11    0    
+
+Multiple lines output from host
+  1/10    s01n11    0    Updating...
+  1/10    s01n11    0    DONE
+
+Timeout of host
+  1/10    s01n11    -9  Connection timeout
+
+[index]  [node]  [returncode]  [output]
+
+Author: Rune Moellegaard Friborg <runef@birc.au.dk>
+"""
+
+##############################################################
+####################### Configuration ########################
+
+VERSION="1.01"
+UPDATED="2014-06-12"
+SSHCMD="/usr/bin/ssh"
+DEFAULT_CONNECT_TIMEOUT=10
+DEFAULT_COMMAND_TIMEOUT=9999999
+DEFAULT_MAXTHREADS=10
+CONNECT_TOKEN="ok"
+
+import os
+import sys
+import getopt
+import subprocess
+import time
+import threading
+import signal
+from math import ceil
+from Queue import Queue, Empty
+
+
+##############################################################
+########################## Classes ###########################
+
+
+class SSHThread(threading.Thread):
+    """Takes a command, executes it, returns output and quits before timeout"""
+    def __init__(self, host, command, resultQueue, connect_timeout):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.host = host
+
+        CONNECT_CHECK = "echo " + CONNECT_TOKEN + " && "
+
+        self.process = subprocess.Popen(["/usr/bin/ssh", 
+                              "-o", "ConnectTimeout="+str(connect_timeout),
+                              "-o", "ConnectionAttempts=1",
+                              "-o", "RSAAuthentication=no",
+                              "-o", "PasswordAuthentication=no",
+                              host, CONNECT_CHECK + command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.started = time.time()
+        self.result = resultQueue
+        self.connected = False
+        self.start()
+
+    def status(self):
+        state = "C"
+        if self.connected:
+            state = "R"
+        return "%s[%s:%ds]" % (self.host, state, ceil(time.time()-self.started))
+
+    def run(self):
+
+        connect_check_characters = self.process.stdout.read(3)
+        if connect_check_characters[:len(CONNECT_TOKEN)] == CONNECT_TOKEN:
+            self.connected = True
+            stdout, stderr = self.process.communicate()
+        else:
+            stdout, stderr = self.process.communicate()
+            stdout = connect_check_characters + stdout
+
+        self.result.put((self.host, self.process.returncode, stdout, stderr))
+        
+        
+    def kill(self):
+        # This is safe to call
+        # If process is still running, then process is killed and resultQueue will get a signal of -9 
+        # If process has just quit, but not sent result to resultQueue, then kill is ignored
+        # If thread has quit, then kill is ignored
+        try:
+            self.process.kill()
+        except OSError,e:
+            if e.errno == 3:
+                #[Errno 3] No such process
+                pass
+            else:
+                raise e
+
+
+class JobHandler(threading.Thread):
+    """Starts threads"""
+    def __init__(self, nodelist, command, maxthreads, connect_timeout, command_timeout, status):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.nodelist = nodelist[:]
+        self.command = command
+        self.maxthreads = maxthreads
+        self.connect_timeout = connect_timeout
+        self.command_timeout = command_timeout
+        self.output_status = status
+
+        self.threads = []
+        self.resultQueue = Queue(999)
+
+        self.running = True
+        self.start()
+
+    def updatethreadlist(self):
+        for t in self.threads:
+            if not t.is_alive():
+                self.threads.remove(t)
+
+    def timeoutthreadlist(self):
+        commandlimit = time.time()-self.command_timeout
+        connectlimit = time.time()-self.connect_timeout
+        for t in self.threads:
+            if t.is_alive():
+                if t.connected:
+                    if t.started < commandlimit:
+                        t.kill()
+                else:
+                    if t.started < connectlimit:
+                        t.kill()
+
+        
+    def run(self):
+        # To enable popping nodes from the end
+        self.nodelist.reverse()
+
+        i = 0
+        while True:
+            # Submit commands
+            if self.nodelist and len(self.threads) < self.maxthreads:
+                for i in xrange(self.maxthreads-len(self.threads)):
+                    if self.nodelist:
+                        node = self.nodelist.pop()
+                        self.threads.append(SSHThread(node, self.command, self.resultQueue, self.connect_timeout))
+                    else:
+                        break
+
+
+            if (i > 19):
+                # ca. per second
+                i = 0
+                self.timeoutthreadlist()
+            
+
+            # Update thread list
+            self.updatethreadlist()
+            
+            # Done?
+            if len(self.nodelist) == 0 and len(self.threads) == 0:
+                self.resultQueue.put(False)
+                return
+
+
+            # Wait for next loop
+            time.sleep(0.05)
+            i += 1
+                
+   
+    def get(self):
+        """
+        Called from main thread
+        """
+        # Blocks until result or done
+        if self.running:
+            if self.output_status:
+                # If no results for a second, then a thread status is written to stdout. 
+                ok = False
+                while not ok: 
+                    try:
+                        result = self.resultQueue.get(timeout=1)
+                        ok = True
+                    except Empty:
+                        o = "# waiting on %d: %s\n" % (len(self.threads), ", ".join([t.status() for t in self.threads]))
+                        l = 120
+                        if len(o) > l:
+                            o = o[:(l-3)] + "..\n"
+
+                        sys.stdout.write(o)
+                        sys.stdout.flush()
+            else:
+                # Block until result
+                result = self.resultQueue.get()
+
+            if not result == False:
+                return result
+            else:
+                self.running = False
+
+        # Done
+        return False
+
+
+##############################################################
+######################### Main ###############################
+
+
+def main():
+    # Parse parameters
+    args = sys.argv[1:]
+    try:
+        opts, args = getopt.getopt(args, "hsc:t:p:f:n:r:", ["help", "status", "connect-timeout=", "command-timeout=", "max-threads=", "nodefile=", "nodelist=", "regexp="])
+    except getopt.GetoptError, err:
+        # print help information and exit:
+        print str(err) # will print something like "option -a not recognized"
+        usage()
+        sys.exit(2)
+    output = None
+    PARAMETERS={
+        "connect_timeout" :DEFAULT_CONNECT_TIMEOUT,
+        "command_timeout" :DEFAULT_COMMAND_TIMEOUT,
+        "maxthreads"      :DEFAULT_MAXTHREADS,
+        "nodelist"        :[],
+        "regexp"          :".*",
+        "status"          :False,
+        "command"         :""
+        }
+    for o, a in opts:
+        if a and a[0] == "=":
+            a = a[1:]
+
+        if o in ("-c", "--connect-timeout"):
+            PARAMETERS["connect_timeout"] = int(a)
+        elif o in ("-t", "--command-timeout"):
+            PARAMETERS["command_timeout"] = int(a)
+        elif o in ("-p", "--max-threads"):
+            PARAMETERS["maxthreads"] = int(a)
+        elif o in ("-f", "--nodefile"):
+            # Read file and add nodes to nodelist
+            if os.path.isfile(a):
+                PARAMETERS["nodelist"].extend(file(a).read().strip().split("\n"))
+            else:
+                sys.stderr.write("Nodefile '"+a+"' could not be found!")
+                sys.exit(1)
+        elif o in ("-n", "--nodelist"):
+            # Nodelist supplements nodefile
+            PARAMETERS["nodelist"].extend(a.strip().split(","))
+        elif o in ("-r", "--regexp"):
+            PARAMETERS["regexp"] = a
+        elif o in ("-s", "--status"):
+            PARAMETERS["status"] = True
+        elif o in ("-h", "--help"):
+            usage()
+            sys.exit()
+        else:
+            assert False, "unhandled option"
+
+    if not args:
+        print("missing arguments. -h / --help for more info.\n")
+        sys.exit()
+
+
+    # Check validity of parameters
+    if len(PARAMETERS["nodelist"]) == 0:
+        sys.stderr.write("No valid nodes specified!")
+        sys.exit(1)
+
+    # Filter nodelist
+    import re
+    m = re.compile(PARAMETERS["regexp"])
+    PARAMETERS["nodelist"] = [host for host in PARAMETERS["nodelist"] if m.match(host)]
+
+    # Get command
+    command = " ".join(args)
+
+
+    # Create pool object
+    pool = JobHandler(PARAMETERS["nodelist"],
+                   command,
+                   PARAMETERS["maxthreads"],
+                   PARAMETERS["connect_timeout"],
+                   PARAMETERS["command_timeout"],
+                   PARAMETERS["status"])
+
+    N = len(PARAMETERS["nodelist"])
+    i = 1
+    result = pool.get()
+    while (not result == False):
+        node, returncode, stdout, stderr = result
+        output = stdout.strip().split("\n")
+        for line in output:
+            sys.stdout.write('{0:>8}  {1:<10} {2:>5}  '.format(str(i)+'/'+str(N), node, returncode))
+            sys.stdout.write(line)
+            sys.stdout.write('\n')
+        if stderr:
+            output = stderr.strip().split("\n")
+            for line in output:
+                sys.stderr.write('{0:>8}  {1:<10} {2:>5}  '.format(str(i)+'/'+str(N), node, returncode))
+                sys.stderr.write(line)
+                sys.stderr.write('\n')
+
+
+        result = pool.get()
+        i += 1
+        
+
+##############################################################
+######################### Help ###############################
+
+def usage():
+    print("""parallel-ssh-cmd version """+VERSION+""" by Rune M. Friborg (updated """+UPDATED+""")
+Usage:
+  parallel-ssh-cmd <parameters> <command>
+
+A fast parallel SSH with output for simple parsing
+
+Run a command on N nodes in parallel
+
+Parameters
+  -c, --connect-timeout  Set timeout on SSH connection phase (default 10 seconds)
+  -t, --command-timeout  Set timeout for command phase
+  -p, --max-threads      Maximum amount of parallel threads
+  -f, --nodefile         File with list of nodes (one node per line)
+  -n, --nodelist         Comma separated list of nodes (supplements -)
+  -r, --regexp           Filter nodelist using Python-style regular expression
+  -s, --status           Output status message of all connections (use for interactive sessions)
+
+  -h, --help      This help message
+""")
+
+if __name__ == "__main__":
+    main()
+
+                               
+
+
+
+    
+    
+        

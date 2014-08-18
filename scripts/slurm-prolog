@@ -1,0 +1,19 @@
+#!/bin/sh
+
+DIR=/var/spool/bash-login-check/
+
+# If no users are logged in we can clear everything in /tmp and /scratch
+if [ ! -d $DIR -o `find $DIR -name 'uid_*' | wc -l` -eq 0 ] ; then
+    find /scratch -path '/scratch/.com' -prune -or -path '/scratch/.usertmp/' -prune -or -delete
+    find /scratch/.usertmp -mindepth 1 -delete
+fi
+
+user=$SLURM_JOB_USER
+tmp=/scratch/$SLURM_JOBID
+mkdir -m 700 $tmp && chown $user.$user $tmp
+tmp=/scratch/fhgfs_$SLURM_JOBID
+mkdir -m 700 $tmp && chown $user.$user $tmp
+
+/usr/local/sbin/auditd-check
+/usr/local/sbin/bash-login-update -a $SLURM_JOB_UID
+

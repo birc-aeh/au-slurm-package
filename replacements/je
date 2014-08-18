@@ -1,0 +1,91 @@
+#!/bin/env python
+import subprocess
+from math import ceil, floor
+import re
+import sys
+import random
+
+def expand_nodes(s):
+    if s.count("[") == 0:
+        for n in s.split(","):
+            yield n
+    else:
+        info = subprocess.Popen(['scontrol', 'show', 'hostname', s], stdout=subprocess.PIPE)
+        for node in info.stdout:
+            yield node.strip()
+        info.wait()
+
+HEADER      = "Job ID        Username  Node    Load on node"
+SEPERATOR1  = "------------  --------  ------  -------------------------------"
+SEPERATOR2  = "---------------------------------------------------------------"
+SEPERATOR = SEPERATOR1
+FORMAT = "%-12s  %-8s  %6s  %4.1f  %4s%%  %s"
+
+SORT_COL = 0
+pattern = re.compile('.')
+
+def get_num_cores(name):
+    if name.startswith("s08"):
+        return 32
+    elif name.startswith("s09"):
+        return 24
+    else:
+        return 16
+
+if len(sys.argv) >= 2 and sys.argv[1] == '-n':
+    SORT_COL = 2
+    if len(sys.argv) > 2:
+        pattern = re.compile(sys.argv[2])
+elif len(sys.argv) == 2:
+    pattern = re.compile(sys.argv[1])
+elif len(sys.argv) != 1:
+    print 'Usage: je [-n] <pattern>'
+    sys.exit(1)
+
+
+try:
+    loads = {}
+    info = subprocess.Popen(['sinfo', "--format=%n;%O;%t", '--noheader'], stdout=subprocess.PIPE)
+    for line in info.stdout:
+        node,load,state = line.strip().split(';')
+        loads[node] = load
+    info.wait()
+
+    info = subprocess.Popen(['squeue',
+            "--format=%i;%t;%u;%N",
+            '--states=R', 
+            '--noheader'], stdout=subprocess.PIPE)
+
+    result = []
+    for line in info.stdout:
+        jobid,state,user,nodes = line.strip().split(';')
+        if state != 'R':
+            continue
+        ex_nodes = list(expand_nodes(nodes))
+        ex_nodestring = ','.join(ex_nodes)
+        if pattern.search(line) == None and pattern.search(ex_nodestring) == None:
+            continue
+        for n in ex_nodes:
+            Ls = loads[n]
+            Lf = float(Ls)
+            ncores = get_num_cores(n)
+            pct = "%.0f" % (Lf/ncores * 100)
+            cores_used = min(int(floor(Lf)), ncores)
+            bar = "|%s%s|" % ( '@'*cores_used, ' '*(ncores - cores_used) )
+            result.append((jobid, user, n, Lf, pct, bar))
+    if len(result) == 0:
+        sys.exit(0)
+    sort_col = lambda x: x[SORT_COL]
+    print HEADER
+    last_val = None
+    for r in sorted(result, key=sort_col):
+        new_val = sort_col(r)
+        if new_val != last_val:
+            print SEPERATOR
+            SEPERATOR = SEPERATOR2
+            last_val = new_val
+        print FORMAT % r
+finally:
+    pass
+#except:
+#    print "Oops, something went wrong"

@@ -1,0 +1,3 @@
+#!/bin/sh
+echo pestat is not available for slurm
+exit 1

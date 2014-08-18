@@ -1,0 +1,34 @@
+#!/bin/sh
+# This script is invoked on the compute nodes(as the user) right before the
+# actual job script begins.
+# We use it to set the most important environment variables we used to have
+# with torque, hopefully allowing most scripts to work without modification.
+echo "export PBS_JOBID=$SLURM_JOBID"
+echo "export PBS_O_WORKDIR=$SLURM_SUBMIT_DIR"
+
+# slurm comes with a generate_pbs_nodefile script, but it generates 1 entry per
+# task per node. Out old system gave 1 entry per cpu allocated for each of the
+# nodes and that is what the mess below replicates.
+nodefile=`mktemp --tmpdir=/scratch/$SLURM_JOBID/ nodes.XXXXXXXX`
+all_nodes=`/opt/slurm/bin/scontrol show hostname $SLURM_JOB_NODELIST`
+python -c "
+from itertools import chain
+nodes = '$all_nodes'.split()
+ntasks = '$SLURM_TASKS_PER_NODE'.split(',')
+# expand 2(x3) to [2,2,2]
+def expand(t):
+  if t.count('x'):
+    pb = t.find('(')
+    pe = t.find(')')
+    return [t[:pb]] * int(t[pb+2:pe])
+  return [t]
+ntasks = chain.from_iterable(expand(t) for t in ntasks)
+res = []
+for node,tasks in zip(nodes,list(ntasks)):
+  for _ in xrange(int(tasks)*int('$SLURM_CPUS_PER_TASK')):
+      res.append(node)
+nodefile = open('$nodefile', 'w')
+print >>nodefile, '\n'.join(res)
+nodefile.close()
+"
+echo "export PBS_NODEFILE=$nodefile"

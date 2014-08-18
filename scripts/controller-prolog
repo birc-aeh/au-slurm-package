@@ -1,0 +1,28 @@
+#!/bin/bash
+
+did_any_fail=N
+
+nlist=/dev/shm/nodes_$SLURM_JOBID
+/opt/slurm/bin/scontrol show hostname $SLURM_JOB_NODELIST > $nlist
+
+# Piping in to the while loop would create a new scope, and did_any_fail would
+# not be set
+INPUT=$(/com/bin/parallel-ssh-cmd -f $nlist /opt/slurm/scripts/slurm-remote-prolog $SLURM_JOBID $SLURM_JOB_USER 2>&1)
+while read PROGRESS NODE ERROR MSG
+do
+    if [ "$ERROR" -ne 0 ]
+    then
+        echo "$NODE: $MSG"
+        did_any_fail=Y
+        /opt/slurm/bin/scontrol update NodeName=$NODE State=DRAIN Reason="$MSG"
+    fi
+done <<< "$INPUT"
+
+rm $nlist
+
+if [ "$did_any_fail" == 'Y' ]
+then
+    echo 'We had failures/timeouts'
+    exit 1
+fi
+

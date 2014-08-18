@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Usage: mj [pattern]
+# Shows all jobs matching pattern. Pattern is a regex that can match jobid,
+# username, etc. Default is to show jobs belonging to the invoker.
+
+me=${USER:-`/usr/bin/whoami`}
+target="`echo ${@:-$me} | tr ' ' '|'`"
+js "$target"
+echo
+#

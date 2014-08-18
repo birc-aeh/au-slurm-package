@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# Waits for all job ids provided in a list. 
+#
+# Author: Rune Moellegaard Friborg <runef@birc.au.dk>
+# Modified by: Anders Halager <aeh@birc.au.dk>
+
+echo "qwait has been deprecated, consider using a job dependency instead" 1>&2
+
+for jobid in $@; do
+	running=1
+	i=10
+	while [ $running -eq 1 ]; do
+		running=$(squeue --jobs=$jobid --noheader 2>/dev/null | wc -l)
+		# The sleep period slowly increases for every sleep
+		if [ $running -eq 1 ]; then
+			sleep $(( 1 + $i ))
+		fi
+		i=$(( $i + 1 ))
+	done
+done;
+exit 0
+

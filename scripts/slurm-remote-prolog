@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# This script is invoked remotely by the controller before starting a job.
+# It checks whether the node can pass a sanity-check. If it can't, it marks
+# itself as being down.
+
+SLURM_JOBID=$1
+SLURM_JOB_USER=$2
+
+if [ -x /com/sbin/slurm-sanity-check ]; then
+    reason=`/com/sbin/slurm-sanity-check -r -v`
+    sane=$?
+    if [ $sane -ne 0 ] ; then
+        echo "$reason"
+        exit 1
+    fi
+else
+    echo No executable sanity check found
+    exit 1
+fi
+
+echo Ok
+exit 0
+

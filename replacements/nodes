@@ -1,0 +1,160 @@
+#!/usr/bin/perl
+
+%PropToQueue = ("s01"    => "normal",
+                "s02"    => "normal",
+                "s03"    => "normal",
+		"s08"    => "fat1",
+		"s09"	 => "fat2");
+
+%QueueOrder= (  "fat2"	     => -250,
+                "fat1"       => -200,
+		"normal"     => -150);
+
+@UD = ("up", "down");
+
+open(PBS,"pbsnodes -a |") || die "Cannot run pbsnodes\n";
+$node = 'empty';
+while (<PBS>) {
+  chomp;
+  if (/^(s[0-9]*n[0-9]*)/) {
+    $node = $1; 
+    $NodeBusy{$node} = 0;
+    $TotalNodes += 1;
+  }
+  elsif(/^ *state *= *(.*)/) {
+    $stat = $1;
+    $tmpstatus = ($stat =~ /down|offline/ ? 1 : 0);
+    $NodeStatus{$node} = $tmpstatus;
+    $NodesDown += 1 if $tmpstatus == 1;
+  }
+  elsif(/^ *properties *= *(.*)/) {
+    undef @props;
+    @props = split(/,/, $1);
+       # Fix problem: qfat noder har både 'fat' og 'x2200':
+       $count = grep /^fat$/, @props;
+       @props = ('fat') if $count>0;
+    for $p (@props) { 
+      if ($PropToQueue{$p}) {
+        $QueueNode{$node} = $PropToQueue{$p};
+        $NodesInQueue{$PropToQueue{$p}}++;
+      }
+    }
+  }
+  elsif(/^ *np *= *(.*)/) {
+    $Cores{$node} = $1;
+    $TotalCores  += $1;
+  }
+}
+close(PBS);
+#
+
+%Queues = %QueueOrder;
+$skip = 1;
+open(QS,"qstat -1n |") || die "Cannot run qstat\n";
+while(<QS>) {
+    chomp;
+    if (/^-----------------/) {
+      $skip = 0;
+      next;
+    }
+    next if $skip == 1;
+
+    @qstatline = split(/\s+/);
+
+    $qstatlen = scalar @qstatline;
+    $queue  = $qstatline[2];
+    $status = $qstatline[$qstatlen-3];
+    $nds    = $qstatline[$qstatlen-7]; $nds = 1 if $nds eq '--';
+    $Queues{$queue} = 'seen';
+
+    if ($status eq 'R') {
+      $RunningJobs++;
+      @procspecs = split(/\+/, $qstatline[$qstatlen-1]);
+      map{s/\/.*//} @procspecs;
+      $i = 0;
+      undef %ND;
+      for $n (@procspecs) {
+        next if $ND{$n}++;  # uniq
+        $NodeBusy{$n} = 1;
+        $BusyCoresInQueue{$queue} += $Cores{$n};
+        $BusyNodesInQueue{$queue} += 1;
+        $TotalBusyCores += scalar @procspecs;
+        $i += $NodeStatus{$n};
+      }
+      $StalledJobs += 1 if $i > 0;
+    }
+    elsif ($status eq 'Q') {
+      $PendingJobs++;
+      $PendingJobsInQueue{$queue}     += 1;
+      $ReqPendingNodesInQueue{$queue}  += $nds; 
+      $ReqPendingNodes += $nds; 
+    }
+    elsif ($status =~ /^[HW]$/) {
+      $HoldingJobs++;
+      $HoldingJobsInQueue{$queue}     += 1;
+      $ReqHoldingNodesInQueue{$queue}  += $nds;
+      $ReqHoldingNodes += $nds;
+    }
+
+}
+close(QS);
+
+for $n (sort keys %Cores) {
+  $fri = 0;
+  if ($NodeBusy{$n} + $NodeStatus{$n} == 0) {
+    $TotalFreeNodes++;
+    $TotalFreeCores += $Cores{$n};
+    $fri = 1;
+  }
+  $CoresDown    += $Cores{$n} if $NodeStatus{$n} == 1;
+  $q = $QueueNode{$n};
+  $DownNodesInQueue{$q}++ if $NodeStatus{$n} == 1;
+  $FreeNodesInQueue{$q}++ if $fri; # Assume Queue is a nodetype!!!
+  #printf("%10s   %2d   %4s\n",  $n, $Cores{$n}, $UD[$NodeStatus{$n}]);    
+}
+
+$TotalBusyNodes = ($TotalNodes-($NodesDown+$TotalFreeNodes));
+printf("Total number of nodes/cores in cluster:  %4d  %5d\n", $TotalNodes, $TotalCores);
+printf("Total number of nodes/cores DOWN:        %4d  %5d\n", $NodesDown,  $CoresDown);
+printf("Total number of nodes/cores ONLINE:      %4d  %5d\n", $TotalNodes-$NodesDown, $TotalCores-$CoresDown);
+printf("Total number of nodes/cores FREE:        %4d  %5d\n", $TotalFreeNodes, $TotalFreeCores);
+printf("Total number of nodes/cores BUSY:        %4d  %5d\n", $TotalBusyNodes, $TotalBusyCores);
+printf("Total number of jobs/\@nodes RUNNING:     %4d  %5d\n", $RunningJobs, $TotalBusyNodes);
+
+#printf("Total number of jobs WAITING for #nodes: %4d  %5d\n", $PendingJobs + $HoldingJobs,
+printf("Total number of jobs/\@nodes WAITING:     %4d  %5d\n", $PendingJobs + $HoldingJobs,
+                                                              $ReqPendingNodes + $ReqHoldingNodes); 
+print "\n";
+
+### for $p (sort byqueueorder keys %PropToQueue) {
+###   $q = $PropToQueue{$p};
+for $q (sort byqueueorder1 keys %Queues) {
+  @a = ($q,
+        $NodesInQueue{$q},
+        $DownNodesInQueue{$q}+0,
+        $BusyNodesInQueue{$q},
+        $NodesInQueue{$q} - $DownNodesInQueue{$q} - $BusyNodesInQueue{$q},
+        $PendingJobsInQueue{$q}+$HoldingJobsInQueue{$q},
+        $ReqPendingNodesInQueue{$q}+$ReqHoldingNodesInQueue{$q},
+       ); 
+  # $a[4] ("free") er ikke helt korrekt. Noder kan blive brugt i andre køer. Derfor:
+  $a[4] = $FreeNodesInQueue{$q};
+
+  if ($NodesInQueue{$q} > 0) {
+    $a[3]=($a[1]-($a[2]+$a[4]));
+    printf("%8s: %3d total,  %3d down,  %3d busy,  %3d free,  %4d/%-4d pend jobs/nodes\n",@a);
+  } else {
+    printf("%8s:   - total,    - down,  %3d busy,    - free,  %4d/%-4d pend jobs/nodes\n",
+           $a[0], $a[3], $a[5], $a[6]);
+  }
+  undef @a;
+}
+
+sub byqueueorder() {
+  $QueueOrder{$PropToQueue{$a}} <=> $QueueOrder{$PropToQueue{$b}}
+}
+
+sub byqueueorder1() {
+  $QueueOrder{$a} <=> $QueueOrder{$b}
+}
+#

@@ -1,0 +1,493 @@
+#!/usr/bin/env python
+"""
+Use this script to generate sbatch scripts. This script is also able to auto-run the generated scripts
+
+Examples of use:
+
+Runs executable on node with inputs and changes to the correct location. stdout and stderr from the sbatch execution is piped to stdout and stderr of qx.
+
+$ qx <executable> input1.* input2.*
+
+Author: Rune Moellegaard Friborg <runef@birc.au.dk>
+"""
+
+import subprocess
+import sys, getopt
+import os
+import uuid
+import time
+
+##############################################################
+####################### Configuration ########################
+
+
+QUEUES={
+    "normal":{
+        "cores":16
+        },
+    "express":{
+        "cores":16
+        },
+    "fat1":{
+        "cores":32
+        },
+    "fat2":{
+        "cores":24
+        }
+    }
+
+
+VERSION="0.11"
+UPDATED="2014-08-13"
+DEFAULT_WALLTIME="48:00:00"
+DEFAULT_MEM="default"
+DEFAULT_NODES=1
+DEFAULT_CORES=1
+DEFAULT_QUEUE="*default*"
+NODESCRATCH="/scratch"
+p = subprocess.Popen(["hostname", "-s"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+CURRENTNODE = p.communicate()[0].strip().replace("n","t")
+
+##############################################################
+##################### File operations ########################
+
+def delete_file(filename):
+    if os.path.isfile(filename):
+        os.unlink(filename)
+
+def output_file_to_stream(filename, stream, retry=False):
+    fp = None
+    if retry:
+        while (not os.path.isfile(filename)):
+            time.sleep(1)
+        fp = open(filename)
+
+    else:
+        if os.path.isfile(filename):
+            fp = open(filename)
+
+    if fp:
+        line = fp.readline()
+        while (line):
+            stream.write(line)
+            line = fp.readline()
+        fp.close()
+
+def is_regular_file(fpath):
+    return os.path.isfile(fpath) and not os.access(fpath, os.X_OK)
+
+def is_exe(fpath):
+    return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+def which(program):
+    fpath, fname = os.path.split(program)
+    if fpath:
+        if is_exe(program):
+            return program
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            exe_file = os.path.join(path, program)
+            if is_exe(exe_file):
+                return exe_file
+
+    return None
+
+
+##############################################################
+##################### Jobscript generation ###################
+
+def add_sources(fp, swlist):
+    SOURCES_DIR="/com/extra"
+    SOURCES_SCRIPT="load.sh"
+
+    fp.write("\n############## Prepare software #########################################\n")
+    for sw in swlist:
+        fp.write("source %s/%s/%s\n" % (SOURCES_DIR, sw, SOURCES_SCRIPT))
+    fp.write("\n")
+
+def add_profiling_start(fp, tag):
+    fp.write("START%s=$(date \"+%%s.%%N\")\n" % tag)
+
+def add_profiling_end(fp, tag):
+    fp.write("END%s=$(date \"+%%s.%%N\")\n" % tag)
+    fp.write("echo -e \"##### PROFILING %s: $(echo \"$END%s - $START%s\" | bc) s\"\n" % ((tag+" "*15)[:15], tag, tag))
+
+def add_copy_to_scratch(fp, pwd, inputs, nodes):
+    if not inputs:
+        return 
+
+    fp.write("\n############## Copy once to scratch #####################################\n")
+    for fparm, decompress in inputs:
+
+        target_filename = os.path.basename(fparm)
+        if fparm[-3:] == '.gz':
+            target_filename = os.path.basename(fparm[:-3])            
+
+        if not fparm:
+            # Skip if fparm == "" or fparm == None
+            continue
+
+        elif fparm[0:len(NODESCRATCH)] == NODESCRATCH:
+            # Data located in /scratch locally
+            if decompress:
+                fp.write("rsh %s \"zcat %s\" > /scratch/$SLURM_JOBID/%s\n" % (CURRENTNODE, fparm, target_filename))
+            else:
+                fp.write("rcp -p -r %s:%s /scratch/$SLURM_JOBID/.\n" % (CURRENTNODE, fparm))
+        elif fparm[0] == "/" or fparm[0] == "~":
+            # Data located on nfs drive
+            if decompress:
+                fp.write("zcat %s > /scratch/$SLURM_JOBID/%s\n" % (fparm, target_filename))
+            else:
+                fp.write("cp -p -r %s /scratch/$SLURM_JOBID/.\n" % fparm)
+        else:
+            if pwd[0:len(NODESCRATCH)] == NODESCRATCH:
+                # Data located in /scratch locally
+                if decompress:
+                    fp.write("rsh %s \"zcat %s/%s\" > /scratch/$SLURM_JOBID/%s\n" % (CURRENTNODE, pwd, fparm, target_filename))
+                else:
+                    fp.write("rcp -p -r %s:%s/%s /scratch/$SLURM_JOBID/.\n" % (CURRENTNODE, pwd, fparm))
+            else:
+                # Data located on nfs drive
+                if decompress:
+                    fp.write("zcat %s/%s > /scratch/$SLURM_JOBID/%s\n" % (pwd, fparm, target_filename))
+                else:
+                    fp.write("cp -p -r %s/%s /scratch/$SLURM_JOBID/.\n" % (pwd, fparm))
+
+    if nodes > 1:
+        fp.write("\n############## Distribute from scratch using O(log N) strategy ##########\n")
+        fp.write("""NODES=$(scontrol show hostname $SLURM_JOB_NODELIST | uniq | grep -v `hostname -s` | sed 's/n/g/g')
+i=0
+j=0
+k=1
+prev[$i]=`hostname -s`
+for node in $NODES; do
+        rsh ${prev[$j]} "rcp -p -r /scratch/$SLURM_JOBID/* $node:/scratch/$SLURM_JOBID/." &
+        j=$(($j+1))
+        i=$(($i+1))
+        prev[$i]=$node
+        if [ $k -eq $j ]; then
+                wait
+                k=$(($i+1))
+                j=0
+        fi
+done
+wait
+""")
+    
+def add_copy_from_scratch(fp, pwd, folder, outputs, nodes):
+
+    if not outputs:
+        return
+
+    fp.write("\n############## Copy from scratch ########################################\n")
+    if folder[0] == "/" or folder[0] == "~":
+        pwd = folder
+        folder = "/"
+
+    if folder:
+        if pwd[0:len(NODESCRATCH)] == NODESCRATCH:
+            # Create folder on remote destination
+            fp.write("rsh %s \"mkdir -p %s/%s\"\n" % (CURRENTNODE, pwd, folder))
+        else:
+            fp.write("mkdir -p %s/%s\n" % (pwd, folder))
+
+    if nodes > 1:
+        fp.write("NODES=$(scontrol show hostname $SLURM_JOB_NODELIST | uniq | grep -v `hostname -s` | sed 's/n/g/g')\n")
+        fp.write("for node in $NODES; do\n")
+        for fparm in outputs:
+
+            if not fparm:
+                # Skip if fparm == "" or fparm == None
+                continue
+            elif pwd[0:len(NODESCRATCH)] == NODESCRATCH:
+                # Copy data to /scratch remotely
+                fp.write("\trsh $node \"rcp -p -r /scratch/$SLURM_JOBID/%s %s:%s/%s/.\"\n" % (fparm, CURRENTNODE, pwd, folder))
+            else:
+                # Copy data to nfs drive
+                fp.write("\trsh $node \"cp -p -r /scratch/$SLURM_JOBID/%s %s/%s/.\"\n" % (fparm,pwd,folder))
+        fp.write("done\n")
+
+    for fparm in outputs:
+
+        if not fparm:
+            # Skip if fparm == "" or fparm == None
+            continue
+        elif pwd[0:len(NODESCRATCH)] == NODESCRATCH:
+            # Copy data to /scratch remotely
+            fp.write("rcp -p -r /scratch/$SLURM_JOBID/%s %s:%s/%s/.\n" % (fparm, CURRENTNODE, pwd, folder))
+        else:
+            # Copy data to nfs drive
+            fp.write("cp -p -r /scratch/$SLURM_JOBID/%s %s/%s/.\n" % (fparm, pwd, folder))
+
+##############################################################
+######################### Main ###############################
+
+
+def main():
+    # Parse parameters
+    args = sys.argv[1:]
+    try:
+        opts, args = getopt.getopt(args, "hwn:c:q:t:m:pxvi:o:", ["help", "wait", "nodes=", "cores=", "queue=", "time=", "mem=", "profile", "execute", "dryrun", "input=", "output=", "dir=", "no-scratch", "ignore-sources", "iz="])
+    except getopt.GetoptError, err:
+        # print help information and exit:
+        print str(err) # will print something like "option -a not recognized"
+        usage()
+        sys.exit(2)
+    output = None
+    PARAMETERS={
+        "nodes"         :DEFAULT_NODES,
+        "cores"         :DEFAULT_CORES,
+        "queue"         :DEFAULT_QUEUE,
+        "walltime"      :DEFAULT_WALLTIME,
+        "mem"           :DEFAULT_MEM,
+        "wait"          :False,
+        "execute"       :True,
+        "ignore-sources":False,
+        "scratch"       :True,
+        "output-dir"    :"$SLURM_JOBID"
+        }
+    prof = False
+    inputs = []
+    outputs = []
+    for o, a in opts:
+        if a and a[0] == "=":
+            a = a[1:]
+
+        if o == "--no-scratch":
+            PARAMETERS["scratch"] = False
+        elif o in ("-i", "--input"):
+            inputs.append((a, False))
+        elif o == "--iz":
+            if a.find("*") > -1:
+                assert False, '--iz does not allow glob matching'
+            inputs.append((a, True))
+        elif o in ("-o", "--output"):
+            outputs.append(a)
+        elif o in ("-n", "--nodes"):
+            PARAMETERS["nodes"] = int(a)
+        elif o in ("-c", "--cores"):
+            PARAMETERS["cores"] = int(a)
+        elif o in ("-q", "--queue"):
+            PARAMETERS["queue"] = a
+        elif o in ("-t", "--time"):
+            PARAMETERS["walltime"] = a
+        elif o in ("-m", "--mem"):
+            PARAMETERS["mem"] = a
+        elif o in ("-w", "--wait"):
+            PARAMETERS["wait"] = True
+        elif o == "--dir":
+            PARAMETERS["output-dir"] = a
+        elif o in ("-p", "--profile"):
+            prof = True
+        elif o in ("-v", "--dryrun"):
+            PARAMETERS["execute"] = False
+        elif o in ("-x", "--execute"):
+            PARAMETERS["execute"] = True
+        elif o == "--ignore-sources":
+            PARAMETERS["ignore-sources"] = True
+        elif o in ("-h", "--help"):
+            usage()
+            sys.exit()
+        else:
+            assert False, "unhandled option"
+
+    if not args:
+        print("missing arguments. -h / --help for more info.\n")
+        sys.exit()
+
+    # Check validity of parameters
+    max_cores_per_node = 16
+    specific_queue = PARAMETERS["queue"] != DEFAULT_QUEUE
+    queue_name = specific_queue and PARAMETERS["queue"] or "normal"
+    if specific_queue:
+        if not QUEUES.has_key(PARAMETERS["queue"]):
+            print("Queue '%s' is not found. Available queues are:\n%s" % (PARAMETERS["queue"], str(QUEUES.keys())))
+            sys.exit()
+        else:
+            max_cores_per_node = QUEUES[PARAMETERS["queue"]]["cores"]
+
+    if PARAMETERS["wait"] and not PARAMETERS["execute"]:
+        PARAMETERS["wait"] = False
+
+    if PARAMETERS["nodes"] > 1:
+        PARAMETERS["cores"]= max_cores_per_node
+    elif PARAMETERS["cores"] > max_cores_per_node:
+        print("Queue '%s' has '%d' cores. You requested '%d' cores!" % (queue_name,max_cores_per_node,PARAMETERS["cores"]))
+        sys.exit()
+
+    if PARAMETERS["mem"] == DEFAULT_MEM:
+        PARAMETERS["mem"] = "%ig" % (PARAMETERS["cores"]*4)
+
+        
+    pwd = os.path.realpath(".")
+
+    # Fix args, such that if put in "", it still appears as a complete list object
+    if len(args) == 1:
+        args = args[0].split(" ")
+    
+    if args[0][-1] == ";" or args[0][-1] == "&":
+        args.insert(1, args[0][-1])
+        args[0] = args[0][:-1]
+
+    # Replace ~ with users HOME
+    if args[0][0] == "~":
+        args[0] = os.environ["HOME"] + args[0][1:]
+ 
+
+    if PARAMETERS["execute"]:
+        if PARAMETERS["wait"]:
+            cmd = ["/usr/bin/env", "srun"]
+
+            if specific_queue:
+                cmd.extend(["-p", queue_name])
+
+            cmd.extend(["-c", str(PARAMETERS["cores"]),
+                        "-N", str(PARAMETERS["nodes"]),
+                        "-t", str(PARAMETERS["walltime"]),
+                        "--mem", str(PARAMETERS["mem"]),
+                        "-j", args[0]]) 
+
+            p = subprocess.Popen(cmd, stdin = subprocess.PIPE, stdout = subprocess.PIPE)
+        else:
+            p = subprocess.Popen(["/usr/bin/env", "sbatch"], stdin = subprocess.PIPE, stdout = subprocess.PIPE)
+        fp = p.stdin
+    else:
+        fp = sys.stdout
+
+    fp.write("#!/bin/sh\n")
+    if specific_queue:
+        fp.write("#SBATCH -p %s\n" % queue_name) 
+    fp.write("#SBATCH --ntasks %i\n" % (PARAMETERS["nodes"]))
+    fp.write("#SBATCH --cpus-per-task %i\n" % (PARAMETERS["cores"]))
+    fp.write("#SBATCH --time %s\n" % PARAMETERS["walltime"])
+    fp.write("#SBATCH --mem %s\n" % PARAMETERS["mem"])
+    # Set name
+    fp.write("#SBATCH --job-name %s\n" % args[0])
+    fp.write("\n")
+    if PARAMETERS["wait"]:
+        fp.write('if [ "$SLURM_PROCID" -ne 0 ] ; then exit 0 fi\n')
+
+    prof and add_profiling_start(fp, "total")
+
+    # Add executable to inputs, if not found using which
+    if PARAMETERS["scratch"]:
+        if which(args[0]) == None:
+            if is_exe(args[0]):
+                # Fix possible user error. User forgot to add "./"
+                inputs.append((args[0], False))
+                args[0] = "./" + args[0]
+            else:
+                # The user has made an error.
+                sys.stderr.write("The file %s is not executable.\n" % args[0])
+                if PARAMETERS["execute"]:
+                    p.kill()
+                sys.exit()
+        elif (args[0][0] != "/") and is_exe(args[0]):
+            # The path is relative!. Executable must be copied to scratch
+            inputs.append((args[0], False))
+            _, fname = os.path.split(args[0])
+            args[0] = "./" + fname
+
+    if PARAMETERS["scratch"]:
+        prof and inputs and add_profiling_start(fp, "cp_to_scratch")
+        add_copy_to_scratch(fp, pwd, inputs, PARAMETERS["nodes"])
+        prof and inputs and add_profiling_end(fp, "cp_to_scratch")
+
+    if not PARAMETERS["ignore-sources"]:
+        if (os.environ.has_key("EXTRAS")):
+            l = os.environ["EXTRAS"].strip(":").split(":")
+            l.reverse()
+            add_sources(fp, l)
+
+    fp.write("\n############## Working directory ########################################\n")
+    if PARAMETERS["scratch"]:
+        fp.write("cd /scratch/$SLURM_JOBID\n\n")
+    else:
+        fp.write("cd \"%s\"\n\n" % pwd)
+
+    fp.write("\n############## Compute ##################################################\n")
+    prof and add_profiling_start(fp, "compute")
+    fp.write(" ".join(args)+"\n")
+    prof and add_profiling_end(fp, "compute")
+    fp.write("\n")
+
+    if PARAMETERS["scratch"]:
+        prof and outputs and add_profiling_start(fp, "cp_from_scratch")
+        add_copy_from_scratch(fp, pwd, PARAMETERS["output-dir"], outputs, PARAMETERS["nodes"])
+        prof and outputs and add_profiling_end(fp, "cp_from_scratch")
+
+    prof and add_profiling_end(fp, "total")
+
+
+    if PARAMETERS["execute"]:
+        fp.close()
+
+        if PARAMETERS["wait"]:
+            for line in p.stdout:
+                sys.stdout.write(line)
+        else:
+            p.wait()
+            jobid = p.stdout.readline().strip()
+            print(jobid)
+    
+        sys.exit(p.returncode)
+
+
+##############################################################
+######################### Help ###############################
+
+def usage():
+    print("""qx version """+VERSION+""" by Rune M. Friborg (updated """+UPDATED+""")
+Usage:
+  qx <parameters> <executable>
+
+Autogenerate and submit a jobscript for sbatch based on the inputs given.
+
+Parameters specific to qx behaviour
+  -w, --wait        Wait for job to finish and redirect stdout and stderr to qx
+                    Enables qx to simulate local executions:
+
+                      qx -w md5sum /project/birc/hugefile
+
+  -v, --dryrun      Skip execution and output jobscript
+
+Parameters specific to job generation
+  --no-scratch      Do not execute in scratch folder (not default)
+  --ignore-sources  Do not prepare extra software packages
+
+  -n, --nodes=<n>   Number of nodes allocated (default 1)
+  -c, --cores=<c>   Number of cores allocated (default 1). Ignored if node count > 1
+  -q, --queue=<q>   Queue identifier (default normal)
+  -t, --time=<t>    Set maximum expected runtime t=HH:MM:SS (default 48:00:00). The job is
+                    terminated, if the job runs longer than this value.
+  -m, --mem=<q>     Memory per node, defaults to 4g per core.
+
+  -p, --profile     Adds profiling commands to the job script, which measures computation
+                    time and time spent copying to/from scratch.
+
+Parameters specific to using the scratch folder
+  -i, --input=<fp>  -i and -o may be spefified multiple types, to allow for more input
+  -o, --output=<fp> and output files. File patterns, such as fx*.tar.* may also be used.
+                    Example (internal fastqc threads):
+
+                      qx -p -c 16 -i=*.fq -o=*fastqc.zip "fastqc -t 8 *.fq"
+
+                    Example (see 'man dispatch'):
+
+                      qx -p -c 16 -i=*.fq -o=*fastqc.zip dispatch -Sc "fastqc" *.fq
+
+  --iz=<fp>[.gz]    Similar to --input, but only accepts full filenames (no glob matching)
+                    and performs automatic decompression of the .gz file.
+
+  --dir=<dest>      The destination where output files will be written to.
+                    (default <jobid>.in). Using --dir=. will write files to the current
+                    folder.
+
+Other parameters
+  -h, --help      This help message
+""")
+
+
+if __name__ == "__main__":
+    main()
+
