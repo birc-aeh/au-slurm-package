@@ -77,9 +77,13 @@ The epilog then closes for ssh connections from the user (disconnecting them,
 Then it deletes the job specific folders, and runs a sanity check to make sure
 the node is still healthy.
 
+Must be present on all compute-nodes.
+
 ### slurm-task-prolog
 The task prolog is run as the user before the users script, it sets a few
 environment variables for compatibility with the old Torque system.
+
+Must be present on all compute-nodes.
 
 ### controller-prolog & slurm-remote-prolog
 We don't want a node to take a job and then immediately fail. It should
@@ -90,6 +94,9 @@ the controller-prolog.
 The `controller-prlog` script then connects to all the proposed nodes and have
 them run a sanity-check (the `slurm-remote-prolog`). If any of the nodes fail
 the proposed set of nodes is discarded and the job goes back in the queue.
+
+The remote prolog must be present on all compute-nodes, the controller prolog
+only needs to be on the controller.
 
 Misc
 ----
