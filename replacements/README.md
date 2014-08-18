@@ -34,7 +34,8 @@ programs expected it to.
 ## qsub
 Our qsub script has a few changes from the one that comes with slurm.
 Again it's not clear if these differences are unique to out torque setup or
-general, but they are as follows:
+general, but they are as follows
+
 1. If no `#!`-line is found, we assume `/bin/sh`
 2. If no script file is given, we read it from stdin
 3. We have a less strict parse of times. 1:0:0 is the same as 1:00:00
