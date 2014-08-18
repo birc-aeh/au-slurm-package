@@ -25,6 +25,7 @@ This is the main config file that is needed on all machines.
 Theoretically you could probably get away with a smaller version on compute
 nodes and frontends, but the files are compared via hashing by default so just
 install identical configs everywhere.
+
 Must be readable by all users.
 
 ### job_submit.lua
