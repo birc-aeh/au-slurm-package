@@ -5,6 +5,8 @@ This is a bunch of program that replace commands we used to have in our old
 torque system. Some were specific to our setup and some are more well known
 torque commands. If a torque command isn't here we use it straight from slurm
 (in the contribs/torque folder).
+When installing we just dump all of these in the slurm bin folder, next to
+`sbatch`, `squeue` etc.
 
 ## js & mj
 js is a simplified version of qstat. mj is the same as js except it default to
@@ -48,6 +50,6 @@ Is a tool for users to submit jobs, mostly used by newer users.
 ## dispatch
 Nice little tool for running embarrassingly parallel jobs. Create a file with
 one command per line. Now you just need to allocate a bunch of nodes/cores and
-dispatch your commandfile and it will run all of them reasonably well
+`dispatch -r` your commandfile and it will run all of them reasonably well
 distributed over all the allocated nodes/cores.
 
