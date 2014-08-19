@@ -59,10 +59,12 @@ the end of the job -- as expected.
 I found the behaviour for the prolog surprising though, it only runs on a node
 when the job starts something on the node.
 That means that with a script like this:
+
     #SBATCH -n 32
     echo nothing
     sleep 1000
     srun hostname
+
 The prolog will run immediately on _one_ node, the other nodes will only run
 with srun -- leaving 1000 seconds where the user can't ssh in, or can ssh in
 but without the node having been setup.
@@ -93,11 +95,36 @@ probably be avoidable by putting a sanity-check in the regular prolog script,
 When the controller has found a suitable set of nodes to run a job, it calls
 the controller-prolog.
 The `controller-prlog` script then connects to all the proposed nodes and have
-them run a sanity-check (the `slurm-remote-prolog`). If any of the nodes fail
+them run a sanity-check (the `slurm-remote-prolog`). If any of the nodes fail,
 the proposed set of nodes is discarded and the job goes back in the queue.
 
 The remote prolog must be present on all compute-nodes, the controller prolog
 only needs to be on the controller.
+
+Tools
+-----
+We have only needed one completely new tool so far. `jobinfo` collects the most
+useful fields from sacct (and sstat for running jobs) and presents it in a
+format that is easier to read and grep.
+
+It takes a very wide format with multiple entries, like this:
+
+       JobID        JobName    Partition  MaxVMSize  MaxVMSizeNode  MaxVMSizeTask  ...
+       ------------ ---------- ---------- ---------- -------------- -------------- ...
+       219304               94 express,n+                                          ...
+       219304.batch      batch               314132K         s01n36              0 ...
+
+And converts it in to something like this:
+
+    Name                : 94
+    User                : qianyuxx
+    Partition           : express,normal
+    Nodes               : s01n36
+    ...
+    Max Mem used        : 3.54M (s01n36)
+    Max Disk Write      : 348.00M (s01n36)
+    Max Disk Read       : 348.00M (s01n36)
+
 
 Misc
 ----
