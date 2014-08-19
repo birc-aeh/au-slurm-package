@@ -1,0 +1,115 @@
+diff -ru slurm-14.03.3-2-unpatched/src/squeue/print.c slurm-14.03.3-2/src/squeue/print.c
+--- slurm-14.03.3-2-unpatched/src/squeue/print.c	2014-06-26 11:25:41.661704010 +0200
++++ slurm-14.03.3-2/src/squeue/print.c	2014-06-26 11:41:31.751703641 +0200
+@@ -547,9 +547,8 @@
+ 	if (job == NULL)	/* Print the Header instead */
+ 		_print_str("USER", width, right, true);
+ 	else {
+-		char *uname = uid_to_string((uid_t) job->user_id);
++		char *uname = uid_to_string_cached((uid_t) job->user_id);
+ 		_print_str(uname, width, right, true);
+-		xfree(uname);
+ 	}
+ 	if (suffix)
+ 		printf("%s", suffix);
+@@ -1462,7 +1461,6 @@
+ 	else {
+ 		char *uname = uid_to_string((uid_t) step->user_id);
+ 		_print_str(uname, width, right, true);
+-		xfree(uname);
+ 	}
+ 	if (suffix)
+ 		printf("%s", suffix);
+diff -ru slurm-14.03.3-2-unpatched/src/squeue/sort.c slurm-14.03.3-2/src/squeue/sort.c
+--- slurm-14.03.3-2-unpatched/src/squeue/sort.c	2014-06-26 11:25:41.640704010 +0200
++++ slurm-14.03.3-2/src/squeue/sort.c	2014-06-26 11:41:45.198703605 +0200
+@@ -756,11 +756,9 @@
+ 
+ 	_get_job_info_from_void(&job1, &job2, void1, void2);
+ 
+-	name1 = uid_to_string((uid_t) job1->user_id);
+-	name2 = uid_to_string((uid_t) job2->user_id);
++	name1 = uid_to_string_cached((uid_t) job1->user_id);
++	name2 = uid_to_string_cached((uid_t) job2->user_id);
+ 	diff = strcmp(name1, name2);
+-	xfree(name1);
+-	xfree(name2);
+ 
+ 	if (reverse_order)
+ 		diff = -diff;
+@@ -980,8 +978,6 @@
+ 	name1 = uid_to_string((uid_t) step1->user_id);
+ 	name2 = uid_to_string((uid_t) step2->user_id);
+ 	diff = strcmp(name1, name2);
+-	xfree(name1);
+-	xfree(name2);
+ 
+ 	if (reverse_order)
+ 		diff = -diff;
+diff -ru slurm-14.03.3-2-unpatched/src/squeue/squeue.c slurm-14.03.3-2/src/squeue/squeue.c
+--- slurm-14.03.3-2-unpatched/src/squeue/squeue.c	2014-06-26 11:25:41.639704010 +0200
++++ slurm-14.03.3-2/src/squeue/squeue.c	2014-06-26 12:18:28.028702737 +0200
+@@ -50,6 +50,7 @@
+ #include <termios.h>
+ 
+ #include "src/common/read_config.h"
++#include "src/common/uid.h"
+ #include "src/common/xstring.h"
+ #include "src/squeue/squeue.h"
+ 
+@@ -69,6 +70,43 @@
+ static int  _print_job ( bool clear_old );
+ static int  _print_job_steps( bool clear_old );
+ 
++typedef struct {
++    uid_t uid;
++    char *username;
++} uid_cache_entry_t;
++
++static uid_cache_entry_t *uid_cache;
++uint32_t uid_cache_allocated;
++uint32_t uid_cache_used;
++
++static int uid_compare(const void *a, const void *b) {
++    uid_t ua = *(const uid_t *)a;
++    uid_t ub = *(const uid_t *)b;
++    return ua - ub;
++}
++
++char *uid_to_string_cached(uid_t uid) {
++    uid_cache_entry_t target = {uid, NULL};
++    uid_cache_entry_t *entry = bsearch(
++            &target,
++            uid_cache,
++            uid_cache_used,
++            sizeof(uid_cache_entry_t),
++            uid_compare);
++    if (entry == NULL) {
++        uid_cache_used += 1;
++        uid_cache = realloc(uid_cache, sizeof(uid_cache_entry_t)*uid_cache_used);
++        uid_cache_entry_t new_entry = {uid, uid_to_string(uid)};
++        uid_cache[uid_cache_used-1] = new_entry;
++        qsort(uid_cache,
++                uid_cache_used,
++                sizeof(uid_cache_entry_t),
++                uid_compare);
++        return new_entry.username;
++    }
++    return entry->username;
++}
++
+ int
+ main (int argc, char *argv[])
+ {
+diff -ru slurm-14.03.3-2-unpatched/src/squeue/squeue.h slurm-14.03.3-2/src/squeue/squeue.h
+--- slurm-14.03.3-2-unpatched/src/squeue/squeue.h	2014-06-26 11:25:41.637704010 +0200
++++ slurm-14.03.3-2/src/squeue/squeue.h	2014-06-26 11:26:25.499703994 +0200
+@@ -120,6 +120,8 @@
+ 
+ extern struct squeue_parameters params;
+ 
++extern char *uid_to_string_cached(uid_t);
++
+ extern void parse_command_line( int argc, char* argv[] );
+ extern int  parse_format( char* format );
+ extern void sort_job_list( List job_list );

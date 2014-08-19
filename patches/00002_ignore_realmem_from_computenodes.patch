@@ -1,0 +1,18 @@
+--- slurm-14.03.3-2-unpatched/src/slurmctld/node_mgr.c	2014-06-26 11:25:36.394704012 +0200
++++ slurm-14.03.3-2/src/slurmctld/node_mgr.c	2014-06-27 09:29:48.481673017 +0200
+@@ -1965,6 +1965,7 @@
+ 		node_ptr->cpus    = reg_msg->cpus;
+ 	}
+ 
++#if 0
+ 	if (reg_msg->real_memory < config_ptr->real_memory) {
+ 		if (slurmctld_conf.fast_schedule == 0) {
+ 			debug("Node %s has low real_memory size (%u < %u)",
+@@ -1981,6 +1982,7 @@
+ 		}
+ 	}
+ 	node_ptr->real_memory = reg_msg->real_memory;
++#endif
+ 
+ 	if (reg_msg->tmp_disk < config_ptr->tmp_disk) {
+ 		if (slurmctld_conf.fast_schedule == 0) {

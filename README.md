@@ -13,6 +13,7 @@ Folder overview
     replacements/   /opt/slurm/bin/         Replacements for most of our old tools
     tools/          /opt/slurm/bin/         New tools to make things nicer for the user
     support-bin/    various                 A few supporting programs
+    init.d/         /etc/init.d/            Simple script for starting/stopping slurm
 
 Config files
 ------------
@@ -149,4 +150,16 @@ Finally you should create some aliases of the script, like this:
     for subsystem in blkio cpuacct cpuset freezer memory; do
         ln -s release_common release_$subsystem 
     done
+
+### simplified-install.sh
+This is a slightly simplified/cleaned version of our install script. Probably
+has a few missing or broken things in it.
+
+### init.d/slurm
+Very primitive script for starting and stopping slurm - no proper header, no
+status function, can probably wait forever when shutting down.
+It automatically finds out which services need to be run on the machine (might
+        be none if the machine is just used for submitting jobs).
+There is no difference between starting and restarting, the slurm daemons
+figure out if they need to replace an old process on their own.
 
