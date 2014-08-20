@@ -49,7 +49,7 @@ users.
 Must be readable by the user that slurmdbd runs under.
 
 ### cgroup.conf
-We configure cgroups to contrain cores, memory and to include swap in the
+We configure cgroups to constrain cores, memory and to include swap in the
 calculations.
 
 Scripts
