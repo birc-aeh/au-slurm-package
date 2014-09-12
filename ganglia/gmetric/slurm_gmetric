@@ -1,0 +1,471 @@
+#!/usr/bin/python
+# Rune M. Friborg and Kasper S. Eenberg (2014)
+# Version: 1.0
+#
+# This software has been tested with Slurm 14.03.0
+#
+# This will submit a large amount of metric data every minute.
+# slurm-gmetric will forcefully kill any already running versions of this software
+
+
+
+# Host to run this script (protects against multiple daemons)
+EXECHOST='s02n67.genomedk.net'
+
+# Slurm
+SLURM_BIN_PREFIX = '/opt/slurm/bin/'
+
+# Ganglia settings
+GMETRIC  = '/com/extra/ganglia/3.6.0/bin/gmetric'
+GMOND_CFG = '/com/extra/ganglia/3.6.0/etc/gmond.conf'
+
+# DEBUG / Testing (Do not send metric data)
+DEBUG     = False
+
+# Run once, then quit
+ONESHOT   = False
+
+# Run as daemon
+DAEMONIZE = True
+
+
+
+
+import subprocess
+import os, sys
+import time
+import signal
+from string import join
+
+# Check host
+import socket
+if EXECHOST != socket.gethostname():
+    sys.stderr.write("Error! slurm_gmetric must run from " + EXECHOST) 
+    sys.exit(1)
+
+# BINARY PATHS
+SDIAG  =   SLURM_BIN_PREFIX + 'sdiag'
+SQUEUE =   SLURM_BIN_PREFIX + 'squeue'
+SINFO  =   SLURM_BIN_PREFIX + 'sinfo'
+SACCT  =   SLURM_BIN_PREFIX + 'sacct'
+SACCTMGR = SLURM_BIN_PREFIX + 'sacctmgr'
+
+SQUEUE_ARGS = ["-h", "-o", "%A %u %t %E"]
+SACCT_CMD = [SACCT, "-s", "PD", "-a", "-n", "-p", "-o", "JobID,State,Submit,Partition"]
+SACCTMGR_USER_CMD = [SACCTMGR, "-nP", "show", "users"]
+
+# Used for storing jobstatus
+jobstatus = {}
+
+def transmit_data(name, val, typ, units, title):
+    if not DEBUG:
+        os.spawnl(os.P_WAIT, GMETRIC, 'gmetric',
+                  '-c'+GMOND_CFG,
+                  '--name='  + name,   # E.g bytes_out
+                  '--value=' + str(val), # E.g an int value
+                  '--type='  + typ,    # E.g uint32
+                  '--units=' + units,  # E.g bytes/sec
+                  '--group=slurm',     # E.g network
+                  '--title=' + title,
+                  '--desc='  + "fisk")  # E.g "Network bytes sent/sec"
+    else:
+        print join([GMETRIC, 'gmetric',
+                  '-c'+GMOND_CFG,
+                  '--name='  + name,   # E.g bytes_out
+                  '--value=' + str(val),    # E.g an int value
+                  '--type='  + typ,    # E.g uint32
+                  '--units=' + units,  # E.g bytes/sec
+                  '--group=slurm',     # E.g network
+                  '--title=' + title])  # E.g "Network bytes sent/sec"
+
+# Parses the time used by sdiag.
+def parse_sdiag_time(inp):
+    res = time.strptime(join(inp), "%b %d %H:%M:%S %Y")
+    return res
+
+# Cmd execution
+class ReadCmdException(Exception):
+    pass
+
+def readcmd(cmdlist):
+    proc = subprocess.Popen(cmdlist,stdout=subprocess.PIPE)
+    stdout, _ = proc.communicate()
+
+    if proc.returncode != 0:
+        sys.stderr.write("readcmd failed with returncode: " + str(proc.returncode) + "\n")
+        sys.stderr.write("readcmd: " + str(cmdlist) + "\n")
+	raise ReadCmdException(str(cmdlist))
+
+    data = stdout.strip().split("\n")
+    return data
+
+
+# MEASUREMENT: Measures cores used per user.
+def cores_per_user():
+    try:
+        cpulist = readcmd([SQUEUE, "-ht", "R", "-o", "%u %C"])
+        userlist = readcmd(SACCTMGR_USER_CMD)
+    except ReadCmdException:
+        # Try again next time.
+        return
+
+    users = {}
+
+    for line in userlist:
+        user = line.split("|")[0]
+        users[user] = 0
+
+    for line in cpulist:
+        ar = line.split()
+        user = ar[0]
+        ncpu = int(ar[1])
+
+        users[user] += ncpu
+
+    for key in users.keys():
+        transmit_data("slurm_cores_" + key,
+                users[key],
+                "uint32",
+                "cores",
+                "Cores used for user " + key)
+
+
+# MEASUREMENT: Waiting time per queue.
+def waiting_time():
+    try:
+        v = readcmd(SACCT_CMD)
+    except ReadCmdException:
+        # Try again next time.
+        return
+
+    # Set by active_jobs()
+    global jobstatus
+
+    now = time.time()
+
+    maxwait = {
+        "express": float(2**31-1),
+        "normal":  float(2**31-1),
+        "fat1":    float(2**31-1),
+        "fat2":    float(2**31-1)
+    }
+
+    for line in v:
+        tok = line.split("|")
+        t = time.mktime(time.strptime(tok[2], "%Y-%m-%dT%H:%M:%S"))
+        jobid = tok[0]
+        partition = tok[3]
+
+        try:
+            # Jobs showing up in sacct might not show up in squeue.
+            # We just ignore those cases.
+            js = jobstatus[jobid]
+        except KeyError:
+            continue
+
+        if tok[1] == "PENDING" and js == "PD" :
+            part = tok[3].split(",")
+            
+            for p in part:
+                if maxwait[p] > t:
+                    maxwait[p] = t
+
+    for k in maxwait.keys():
+        if maxwait[k] == 2**31-1:
+            maxwait[k] = 0
+        else:
+            maxwait[k] = (now - maxwait[k])/(60*60)
+
+        transmit_data("slurm_hours_maxwait_" + k,
+                maxwait[k],
+                "float",
+                "hours",
+                "Waiting time in hours for pending jobs in queue " + k
+            )
+
+
+# MEASUREMENT: List of active jobs on cluster
+def active_jobs():
+    running = 0
+    pending = 0
+    hold    = 0
+
+    user_run = {}
+    user_pen = {}
+    user_hol = {}
+
+    global jobstatus
+    jobstatus = {}
+
+    try:
+        v = readcmd([SQUEUE] + SQUEUE_ARGS)
+    except ReadCmdException:
+        # Try again next time.
+        return
+
+    for l in v:
+        tok = l.split()
+        status = tok[2]
+        user   = tok[1]
+        jobid  = tok[0]
+
+        if status in ["R"]:
+            running += 1
+            user_run[user] = user_run.get(user, 0) + 1
+            jobstatus[jobid] = "R"
+
+        elif status in ["PD"]:
+            if len(tok) > 3:
+                hold += 1
+                user_hol[user] = user_hol.get(user, 0) + 1
+                jobstatus[jobid] = "HL"
+            else:
+                pending += 1
+                user_pen[user] = user_pen.get(user, 0) + 1
+                jobstatus[jobid] = "PD"
+
+    transmit_data("slurm_jobs_running",
+            running,
+            "uint32",
+            "jobs",
+            "Amount of jobs currently running on cluster")
+
+    transmit_data("slurm_jobs_pending",
+            pending,
+            "uint32",
+            "jobs",
+            "Amount of jobs currently pending on cluster")
+
+    transmit_data("slurm_jobs_onhold",
+            hold,
+            "uint32",
+            "jobs",
+            "Amount of jobs waiting for prerequisite jobs to finish")
+
+
+    transmit_data("slurm_users_running",
+            len(user_run),
+            "uint32",
+            "users",
+            "Users with running jobs on cluster")
+
+    transmit_data("slurm_users_pending",
+            len(user_pen),
+            "uint32",
+            "users",
+            "Users with pending jobs on cluster")
+
+    transmit_data("slurm_users_onhold",
+            len(user_hol),
+            "uint32",
+            "users",
+            "Users with jobs on hold on cluster")
+
+# MEASUREMENT: Commits historic job history.
+def historic_jobs():
+    try:
+        v = readcmd([SDIAG])
+    except ReadCmdException:
+        # Try again next time.
+        return
+
+    firstrun = 0
+
+    sub   = int(v[7].split()[2])
+    start = int(v[8].split()[2])
+    comp  = int(v[9].split()[2])
+    canc  = int(v[10].split()[2])
+    fail  = int(v[11].split()[2])
+
+    transmit_data("slurm_jobs_submitted",
+            sub,
+            "uint32",
+            "jobs/minute",
+            "Jobs submitted to slurm since sdiag reset")
+
+    transmit_data("slurm_jobs_started",
+            start,
+            "uint32",
+            "jobs/minute",
+            "Jobs started by slurm since sdiag reset")
+
+    transmit_data("slurm_jobs_completed",
+            comp,
+            "uint32",
+            "jobs/minute",
+            "Jobs completed through slurm since sdiag reset")
+
+    transmit_data("slurm_jobs_cancelled",
+            canc,
+            "uint32",
+            "jobs/minute",
+            "Jobs cancelled on slurm since sdiag reset")
+
+    transmit_data("slurm_jobs_failed",
+            fail,
+            "uint32",
+            "jobs/minute",
+            "Jobs failed on slurm since sdiag reset")
+
+# MEASUREMENT: Status of nodes
+def node_status():
+    try:
+        v = readcmd([SINFO, "-h", "-o", "%P %n %T %c"])
+    except ReadCmdException:
+        # Try again next time.
+        return
+
+    drained   = 0
+    allocated = 0
+    idle      = 0
+    down      = 0
+    num_cpus  = 0
+
+    all_keys = ["allocated", "mixed", "draining", "failing", "completing"]
+    idl_keys = ["idle"]
+    dow_keys = ["down", "fail", "unknown"]
+    dra_keys = ["drained"]
+
+    for line in v:
+        ar = line.split()
+        status = ar[2]
+
+        # A '*' is added if the host isn't responding, which is why this looks
+        # as it does.
+        if any(map(lambda st: status.startswith(st), all_keys)):
+            allocated += 1
+            num_cpus  += int(ar[3])
+        if any(map(lambda st: status.startswith(st), idl_keys)):
+            idle += 1
+            num_cpus  += int(ar[3])
+        if any(map(lambda st: status.startswith(st), dow_keys)):
+            down += 1
+        if any(map(lambda st: status.startswith(st), dra_keys)):
+            drained += 1
+
+    #print "All: {0}, Idle: {1}, Down: {2}, Drain: {3}".format(allocated, idle, down, drained)
+
+    transmit_data("slurm_nodes_allocated",
+            allocated,
+            "uint32",
+            "nodes",
+            "Amount of nodes with status allocated")
+
+    transmit_data("slurm_nodes_idle",
+            idle,
+            "uint32",
+            "nodes",
+            "Amount of nodes with status idle")
+
+    transmit_data("slurm_nodes_drained",
+            drained,
+            "uint32",
+            "nodes",
+            "Amount of nodes with status drained")
+
+    transmit_data("slurm_nodes_down",
+            down,
+            "uint32",
+            "nodes",
+            "Amount of nodes with status down")
+
+    transmit_data("slurm_cores_total",
+            num_cpus,
+            "uint32",
+            "cores",
+            "Total amount of cores available or idle")
+
+# Find all the users.
+def user_overview():
+    try:
+        v = readcmd([SQUEUE, "-h", "-o", "%u %t"])
+    except ReadCmdException:
+        # Try again next time.
+        return
+
+    run = {}
+    pen = {}
+    hol = {}
+
+    for line in v:
+        ar = line.split()
+        if ar[1] in ["R"]:
+            if ar[0] in run:
+                run[ar[0]] += 1
+            else:
+                run[ar[0]] = 1
+
+        elif ar[1] in ["PD"]:
+            if ar[0] in d:
+                d[ar[0]] += 1
+            else:
+                d[ar[0]] = 1
+
+
+# Main event loop.
+def ticker(signum, frame):
+    historic_jobs()
+    node_status()
+    active_jobs()
+    waiting_time() # Waiting time depends on active_jobs being called first.
+    cores_per_user()
+
+def killhandler(signum, frame):
+    sys.exit(0)
+
+# Double-fork daemonization
+if __name__ == "__main__":
+    mypid = os.getpid()
+
+    # This nifty thing kills all other processes that match sys.argv[0]
+    # through pgrep.
+    os.system("pgrep " + os.path.basename(sys.argv[0]) +
+            " | grep -v " + str(mypid) + " | xargs -r -n 1 kill -9")
+
+    if DAEMONIZE:
+        try:
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+        except OSError, e:
+            print >>sys.stderr, "fork #1 failed: %d (%s)" % (e.errno, e.strerror)
+            sys.exit(1)
+
+        os.chdir("/")
+        os.setsid()
+        os.umask(0)
+
+        try:
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+        except OSError, e:
+            print >>sys.stderr, "fork #2 failed: %d (%s)" % (e.errno, e.strerror)
+
+
+    # Find when we start, we run at second 58 each minute.
+    now = time.time()
+    init_time = now
+    init_time = init_time - (init_time % 60) + 58
+
+    # The timer won't run with 0 init time
+    if init_time == now:
+        init_time += 1
+
+    ltime = time.localtime(init_time)
+
+    # Set up our timer listener
+    signal.signal(signal.SIGALRM, ticker)
+    signal.signal(signal.SIGINT, killhandler) 
+
+    if not ONESHOT:
+        # Start the timer
+        signal.setitimer(signal.ITIMER_REAL, init_time - now, 60)
+        #signal.setitimer(signal.ITIMER_REAL, 3, 5)
+    else:
+        ticker(0, 0)
+        sys.exit(0)
+
+    while 1:
+        # Pause until we get a signal, then pause again.
+        signal.pause()
