@@ -1,0 +1,63 @@
+#!/bin/sh
+PATH=/sbin:/usr/sbin:$PATH
+
+. /etc/rc.d/init.d/functions
+
+if [ "`id -u`" != "0" ] ; then
+    echo "You must be root to start slurm"
+    exit 1
+fi
+
+case "$1" in
+    start|restart)
+        /opt/slurm/bin/scontrol show daemons | grep -q slurmctld
+        if [ $? -eq 0 ] ; then
+            echo -n "Starting slurmdbd:"
+            su - munge -c /opt/slurm/sbin/slurmdbd
+            if [ $? -eq 0 ] ; then
+                echo "       [sucess]"
+            else
+                echo "      [failure]"
+            fi
+            echo -n "Starting slurmctld:"
+            su - munge -c /opt/slurm/sbin/slurmctld
+            if [ $? -eq 0 ] ; then
+                echo "       [sucess]"
+            else
+                echo "      [failure]"
+            fi
+        fi
+
+        /opt/slurm/bin/scontrol show daemons | grep -q slurmd
+        if [ $? -eq 0 ] ; then
+            echo -n "Starting slurmd:"
+            /opt/slurm/sbin/slurmd
+            if [ $? -eq 0 ] ; then
+                echo "          [sucess]"
+            else
+                echo "         [failure]"
+            fi
+        fi
+        ;;
+    stop)
+        echo "Stopping daemons"
+        pkill -u root  slurmd
+        pkill -u munge slurmctld
+        while [ "$(pgrep -u root slurmd | wc -l)" -ge 1 ]
+        do
+            sleep 1
+        done
+        while [ "$(pgrep -u munge slurmctld | wc -l)" -ge 1 ]
+        do
+            sleep 1
+        done
+        pkill -u munge slurmdbd
+        while [ "$(pgrep -u munge slurmdbd | wc -l)" -ge 1 ]
+        do
+            sleep 1
+        done
+        ;;
+    *)
+        echo "Usage: $0 [start|restart|stop]"
+        ;;
+esac
