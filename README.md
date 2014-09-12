@@ -14,6 +14,7 @@ Folder overview
     tools/          /opt/slurm/bin/         New tools to make things nicer for the user
     support-bin/    various                 A few supporting programs
     init.d/         /etc/init.d/            Simple script for starting/stopping slurm
+    ganglia/        ...                     Ganglia gmetric script and web scripts
 
 Config files
 ------------
@@ -163,3 +164,9 @@ It automatically finds out which services need to be run on the machine (might
 There is no difference between starting and restarting, the slurm daemons
 figure out if they need to replace an old process on their own.
 
+### Ganglia
+It is very simple to configure, if you already have a running Ganglia Monitoring system.
+
+![](https://github.com/github/training-kit/blob/master/images/professortocat.png)
+
+![](https://github.com/runefriborg/misc-slurm-stuff/blob/master/slurm-ganglia-screenhost.png)
