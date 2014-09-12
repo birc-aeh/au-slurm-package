@@ -167,6 +167,11 @@ figure out if they need to replace an old process on their own.
 ### Ganglia
 It is very simple to configure, if you already have a running Ganglia Monitoring system.
 
-![](https://github.com/github/training-kit/blob/master/images/professortocat.png)
-
 ![](https://github.com/runefriborg/misc-slurm-stuff/blob/master/slurm-ganglia-screenhost.png)
+
+1. Edit the constants in ganglia/gmetric/slurm-gmetric and start it from a host with access
+to the slurm executables.
+
+2. Copy the files from ganglia/www to your ganglia web installation (3.6.0) and point your browser to http://ganglia-installation/slurm.php
+
+
