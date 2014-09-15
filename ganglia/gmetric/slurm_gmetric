@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # Rune M. Friborg and Kasper S. Eenberg (2014)
-# Version: 1.0
+# Version: 1.1
 #
 # This software has been tested with Slurm 14.03.0
 #
@@ -88,8 +88,14 @@ class ReadCmdException(Exception):
     pass
 
 def readcmd(cmdlist):
-    proc = subprocess.Popen(cmdlist,stdout=subprocess.PIPE)
-    stdout, _ = proc.communicate()
+    try:
+        proc = subprocess.Popen(cmdlist,stdout=subprocess.PIPE)
+        stdout, _ = proc.communicate()
+    except IOError:
+        sys.stderr.write("readcmd failed with an IOError\n")
+        sys.stderr.write("readcmd: " + str(cmdlist) + "\OAn")
+        raise ReadCmdException(str(cmdlist))
+
 
     if proc.returncode != 0:
         sys.stderr.write("readcmd failed with returncode: " + str(proc.returncode) + "\n")
