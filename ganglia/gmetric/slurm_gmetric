@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Rune M. Friborg and Kasper S. Eenberg (2014)
+# Rune M. Friborg (2014)
 # Version: 1.1
 #
 # This software has been tested with Slurm 14.03.0
@@ -59,15 +59,20 @@ jobstatus = {}
 
 def transmit_data(name, val, typ, units, title):
     if not DEBUG:
-        os.spawnl(os.P_WAIT, GMETRIC, 'gmetric',
-                  '-c'+GMOND_CFG,
-                  '--name='  + name,   # E.g bytes_out
-                  '--value=' + str(val), # E.g an int value
-                  '--type='  + typ,    # E.g uint32
-                  '--units=' + units,  # E.g bytes/sec
-                  '--group=slurm',     # E.g network
-                  '--title=' + title,
-                  '--desc='  + "fisk")  # E.g "Network bytes sent/sec"
+        try:
+            os.spawnl(os.P_WAIT, GMETRIC, 'gmetric',
+                      '-c'+GMOND_CFG,
+                      '--name='  + name,   # E.g bytes_out
+                      '--value=' + str(val), # E.g an int value
+                      '--type='  + typ,    # E.g uint32
+                      '--units=' + units,  # E.g bytes/sec
+                      '--group=slurm',     # E.g network
+                      '--title=' + title,
+                      '--desc='  + "fisk")  # E.g "Network bytes sent/sec"
+        except OSError:
+            sys.stderr.write("transmit_data failed with an OSError\n")
+            pass
+
     else:
         print join([GMETRIC, 'gmetric',
                   '-c'+GMOND_CFG,
@@ -93,7 +98,7 @@ def readcmd(cmdlist):
         stdout, _ = proc.communicate()
     except IOError:
         sys.stderr.write("readcmd failed with an IOError\n")
-        sys.stderr.write("readcmd: " + str(cmdlist) + "\OAn")
+        sys.stderr.write("readcmd: " + str(cmdlist) + "\n")
         raise ReadCmdException(str(cmdlist))
 
 
@@ -173,8 +178,11 @@ def waiting_time():
             part = tok[3].split(",")
             
             for p in part:
-                if maxwait[p] > t:
-                    maxwait[p] = t
+                if p in maxwait:
+                    if maxwait[p] > t:
+                        maxwait[p] = t
+                else:
+                    sys.stderr.write("Error parsing partition list:'"+str(part)+"'\n")
 
     for k in maxwait.keys():
         if maxwait[k] == 2**31-1:
