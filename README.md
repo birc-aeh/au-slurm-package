@@ -1,4 +1,4 @@
-misc-slurm-stuff
+au-slurm-package
 ================
 
 The various configs and tools we use on the GenomeDK cluster
