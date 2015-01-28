@@ -37,13 +37,10 @@ function slurm_job_submit ( job_desc, part_list, submit_uid )
         log_user(" ** ERROR ** You _must_ specify required memory")
         return slurm.ERROR
     end --]]
-    -- if less than an hour is requested, add the express partition as a
-    -- possibility
-    if (job_desc.partition == nil or job_desc.partition == "normal")
-        and job_desc.time_limit ~= nil
-        and job_desc.time_limit <= 60
+    -- express jobs can also be handled by the normal partition
+    if job_desc.partition == "express"
         then
-            log_info("slurm_job_submit: job from uid %d, add 'express'", job_desc.user_id)
+            log_info("slurm_job_submit: job from uid %d, add 'normal'", job_desc.user_id)
             job_desc.partition = "express,normal"
         end
 
