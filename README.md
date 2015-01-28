@@ -49,8 +49,7 @@ users.
 Must be readable by the user that slurmdbd runs under.
 
 ### cgroup.conf
-We configure cgroups to constrain cores, memory and to include swap in the
-calculations.
+We configure cgroups to constrain cores.
 
 Scripts
 -------
@@ -137,9 +136,9 @@ binaries can find the libraries they need.
 
 ### cgroups
 Enabling cgroups means that when ever a job is started it is allocated a set of
-cores and some amount of memory. Every subprocess of the job is also bound to
-these constraints. This means that we can have a bad job, pushing the load
-average of a machine to 100 with no discernible impact on the other jobs.
+cores. Every subprocess of the job is also bound to these constraints. This means
+that we can have a bad job, pushing the load average of a machine to 100 with no
+discernible impact on the other jobs.
 
 The install procedure is to install the cgroup.conf file next to the slurm.conf
 file on all compute nodes, and installing the slurm release_common script where
