@@ -35,8 +35,7 @@ This script is only needed on the controller, but is not sensitive so you can
 install it everywhere if that is easier.
 It does two things for our setup:
 
-1. A job that asks for 1 hour or less of walltime is automatically added in
-our express partition.
+1. If a job is submitted to the express queue, it is also added to the normal queue.
 2. If no specific stdout/stderr names have been asked for we set it to
 jobname-jobid.out in stead of the standard slurm-jobid.out.
 
