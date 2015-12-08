@@ -1,8 +1,8 @@
 #!/usr/bin/python
-# Rune M. Friborg (2014)
-# Version: 1.1
+# Rune M. Friborg (2015)
+# Version: 1.4
 #
-# This software has been tested with Slurm 14.03.0
+# This software has been tested with Slurm 15.08.4
 #
 # This will submit a large amount of metric data every minute.
 # slurm-gmetric will forcefully kill any already running versions of this software
@@ -29,8 +29,6 @@ ONESHOT   = False
 DAEMONIZE = True
 
 
-
-
 import subprocess
 import os, sys
 import time
@@ -47,15 +45,10 @@ if EXECHOST != socket.gethostname():
 SDIAG  =   SLURM_BIN_PREFIX + 'sdiag'
 SQUEUE =   SLURM_BIN_PREFIX + 'squeue'
 SINFO  =   SLURM_BIN_PREFIX + 'sinfo'
-SACCT  =   SLURM_BIN_PREFIX + 'sacct'
 SACCTMGR = SLURM_BIN_PREFIX + 'sacctmgr'
 
-SQUEUE_ARGS = ["-h", "-o", "%A %u %t %E"]
-SACCT_CMD = [SACCT, "-s", "PD", "-a", "-n", "-p", "-o", "JobID,State,Submit,Partition"]
+SQUEUE_ARGS = ["-h", "--array", "-o", "%A %u %t %V %P %C %E"]
 SACCTMGR_USER_CMD = [SACCTMGR, "-nP", "show", "users"]
-
-# Used for storing jobstatus
-jobstatus = {}
 
 def transmit_data(name, val, typ, units, title):
     if not DEBUG:
@@ -110,11 +103,47 @@ def readcmd(cmdlist):
     data = stdout.strip().split("\n")
     return data
 
+# Execute commands to gather squeue data and parse it
+def gather_squeue_data():
+    try:
+        v = readcmd([SQUEUE] + SQUEUE_ARGS)
+    except ReadCmdException:
+        # Try again next time.
+        return None
+
+    running_list = []
+    hold_list = []
+    pending_list = []
+
+    #SQUEUE_ARGS = ["-h", "--array", "-o", "%A %u %t %V %P %C %E"]
+    for l in v:
+        job = l.split(' ')
+        if len(job) == 6:
+            jobid, user, status, submittime, partition, cpus = job
+            dependency = ""
+        else:
+            jobid, user, status, submittime, partition, cpus, dependency = job
+        
+
+        if status == "R":
+            running_list.append(job[:6])
+        elif status == "PD":   
+            if dependency == "":
+                pending_list.append(job[:6])
+            else:
+                hold_list.append(job)
+
+    data = {
+        "running": running_list,
+        "hold" : hold_list,
+        "pending": pending_list
+        }
+
+    return data
 
 # MEASUREMENT: Measures cores used per user.
-def cores_per_user():
+def cores_per_user(data):
     try:
-        cpulist = readcmd([SQUEUE, "-ht", "R", "-o", "%u %C"])
         userlist = readcmd(SACCTMGR_USER_CMD)
     except ReadCmdException:
         # Try again next time.
@@ -126,10 +155,9 @@ def cores_per_user():
         user = line.split("|")[0]
         users[user] = 0
 
-    for line in cpulist:
-        ar = line.split()
-        user = ar[0]
-        ncpu = int(ar[1])
+    for job in data["running"]:
+        user = job[1]
+        ncpu = int(job[5])
 
         users[user] += ncpu
 
@@ -142,15 +170,7 @@ def cores_per_user():
 
 
 # MEASUREMENT: Waiting time per queue.
-def waiting_time():
-    try:
-        v = readcmd(SACCT_CMD)
-    except ReadCmdException:
-        # Try again next time.
-        return
-
-    # Set by active_jobs()
-    global jobstatus
+def waiting_time(data):
 
     now = time.time()
 
@@ -158,31 +178,26 @@ def waiting_time():
         "express": float(2**31-1),
         "normal":  float(2**31-1),
         "fat1":    float(2**31-1),
-        "fat2":    float(2**31-1)
+        "fat2":    float(2**31-1),
+        "ipsych_express": float(2**31-1),
+        "ipsych_normal":  float(2**31-1),
+        "ipsych_fat1":    float(2**31-1),
+        "ipsych_fat2":    float(2**31-1),
     }
 
-    for line in v:
-        tok = line.split("|")
-        t = time.mktime(time.strptime(tok[2], "%Y-%m-%dT%H:%M:%S"))
-        jobid = tok[0]
-        partition = tok[3]
 
-        try:
-            # Jobs showing up in sacct might not show up in squeue.
-            # We just ignore those cases.
-            js = jobstatus[jobid]
-        except KeyError:
-            continue
+    for job in data["pending"]:
+        jobid, user, status, submittime, partition, cpus = job
 
-        if tok[1] == "PENDING" and js == "PD" :
-            part = tok[3].split(",")
-            
-            for p in part:
-                if p in maxwait:
-                    if maxwait[p] > t:
-                        maxwait[p] = t
-                else:
-                    sys.stderr.write("Error parsing partition list:'"+str(part)+"'\n")
+        t = time.mktime(time.strptime(submittime, "%Y-%m-%dT%H:%M:%S"))
+
+        partition_list = partition.split(",")
+        for p in partition_list:
+            if p in maxwait:
+                if maxwait[p] > t:
+                    maxwait[p] = t
+            else:
+                sys.stderr.write("Error parsing partition list:'"+str(partition_list)+"'\n")
 
     for k in maxwait.keys():
         if maxwait[k] == 2**31-1:
@@ -199,44 +214,27 @@ def waiting_time():
 
 
 # MEASUREMENT: List of active jobs on cluster
-def active_jobs():
-    running = 0
-    pending = 0
-    hold    = 0
+def active_jobs(data):
+    running = len(data["running"])
+    pending = len(data["pending"])
+    hold    = len(data["hold"])
 
-    user_run = {}
-    user_pen = {}
-    user_hol = {}
+    count_distinct_r_users = 0
+    count_distinct_p_users = 0
+    count_distinct_h_users = 0
 
-    global jobstatus
-    jobstatus = {}
+    users = zip(*data["running"])
+    if users:  
+        count_distinct_r_users = len(set(users[1]))
 
-    try:
-        v = readcmd([SQUEUE] + SQUEUE_ARGS)
-    except ReadCmdException:
-        # Try again next time.
-        return
+    users = zip(*data["pending"])
+    if users:  
+        count_distinct_p_users = len(set(users[1]))
 
-    for l in v:
-        tok = l.split()
-        status = tok[2]
-        user   = tok[1]
-        jobid  = tok[0]
+    users = zip(*data["hold"])
+    if users:  
+        count_distinct_h_users = len(set(users[1]))
 
-        if status in ["R"]:
-            running += 1
-            user_run[user] = user_run.get(user, 0) + 1
-            jobstatus[jobid] = "R"
-
-        elif status in ["PD"]:
-            if len(tok) > 3:
-                hold += 1
-                user_hol[user] = user_hol.get(user, 0) + 1
-                jobstatus[jobid] = "HL"
-            else:
-                pending += 1
-                user_pen[user] = user_pen.get(user, 0) + 1
-                jobstatus[jobid] = "PD"
 
     transmit_data("slurm_jobs_running",
             running,
@@ -256,21 +254,20 @@ def active_jobs():
             "jobs",
             "Amount of jobs waiting for prerequisite jobs to finish")
 
-
     transmit_data("slurm_users_running",
-            len(user_run),
+            count_distinct_r_users,
             "uint32",
             "users",
             "Users with running jobs on cluster")
 
     transmit_data("slurm_users_pending",
-            len(user_pen),
+            count_distinct_p_users,
             "uint32",
             "users",
             "Users with pending jobs on cluster")
 
     transmit_data("slurm_users_onhold",
-            len(user_hol),
+            count_distinct_h_users,
             "uint32",
             "users",
             "Users with jobs on hold on cluster")
@@ -327,7 +324,7 @@ def node_status():
         v = readcmd([SINFO, "-h", "-o", "%P %n %T %c"])
     except ReadCmdException:
         # Try again next time.
-        return
+        return 
 
     drained   = 0
     allocated = 0
@@ -339,10 +336,14 @@ def node_status():
     idl_keys = ["idle"]
     dow_keys = ["down", "fail", "unknown"]
     dra_keys = ["drained"]
+    seen_nodes = set()
 
     for line in v:
         ar = line.split()
         status = ar[2]
+        if ar[1] in seen_nodes:
+            continue
+        seen_nodes.add(ar[1])
 
         # A '*' is added if the host isn't responding, which is why this looks
         # as it does.
@@ -392,7 +393,7 @@ def node_status():
 # Find all the users.
 def user_overview():
     try:
-        v = readcmd([SQUEUE, "-h", "-o", "%u %t"])
+        v = readcmd([SQUEUE, "--array", "-h", "-o", "%u %t"])
     except ReadCmdException:
         # Try again next time.
         return
@@ -420,9 +421,17 @@ def user_overview():
 def ticker(signum, frame):
     historic_jobs()
     node_status()
-    active_jobs()
-    waiting_time() # Waiting time depends on active_jobs being called first.
-    cores_per_user()
+
+    data = gather_squeue_data()
+    if data != None:
+        active_jobs(data)
+        waiting_time(data)
+        cores_per_user(data)
+
+    #jobstatus = active_jobs()
+    # -- temp: sacct is slow right now, don't update this
+    # waiting_time(jobstatus) # Waiting time depends on active_jobs being called first.
+    #cores_per_user()
 
 def killhandler(signum, frame):
     sys.exit(0)
