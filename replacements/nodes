@@ -3,6 +3,7 @@
 %PropToQueue = ("s01"    => "normal",
                 "s02"    => "normal",
                 "s03"    => "normal",
+                "s04"    => "normal",
 		"s08"    => "fat1",
 		"s09"	 => "fat2");
 
