@@ -33,12 +33,24 @@ QUEUES={
         },
     "fat2":{
         "cores":24
+        },
+    "ipsych_normal":{
+        "cores":16
+        },
+    "ipsych_express":{
+        "cores":16
+        },
+    "ipsych_fat1":{
+        "cores":32
+        },
+    "ipsych_fat2":{
+        "cores":24
         }
     }
 
 
-VERSION="0.11"
-UPDATED="2014-08-13"
+VERSION="0.12"
+UPDATED="2014-08-28"
 DEFAULT_WALLTIME="48:00:00"
 DEFAULT_MEM="default"
 DEFAULT_NODES=1
@@ -227,7 +239,7 @@ def main():
     # Parse parameters
     args = sys.argv[1:]
     try:
-        opts, args = getopt.getopt(args, "hwn:c:q:t:m:pxvi:o:", ["help", "wait", "nodes=", "cores=", "queue=", "time=", "mem=", "profile", "execute", "dryrun", "input=", "output=", "dir=", "no-scratch", "ignore-sources", "iz="])
+        opts, args = getopt.getopt(args, "hwn:c:q:t:m:pxvi:o:", ["help", "wait", "nodes=", "cores=", "queue=", "time=", "mem=", "profile", "execute", "dryrun", "input=", "output=", "dir=", "no-scratch", "ignore-sources", "iz=", "sbatch="])
     except getopt.GetoptError, err:
         # print help information and exit:
         print str(err) # will print something like "option -a not recognized"
@@ -244,6 +256,7 @@ def main():
         "execute"       :True,
         "ignore-sources":False,
         "scratch"       :True,
+        "slurm-options" :[],
         "output-dir"    :"$SLURM_JOBID"
         }
     prof = False
@@ -261,6 +274,8 @@ def main():
             if a.find("*") > -1:
                 assert False, '--iz does not allow glob matching'
             inputs.append((a, True))
+        elif o == "--sbatch":
+            PARAMETERS["slurm-options"].append(a)
         elif o in ("-o", "--output"):
             outputs.append(a)
         elif o in ("-n", "--nodes"):
@@ -309,9 +324,7 @@ def main():
     if PARAMETERS["wait"] and not PARAMETERS["execute"]:
         PARAMETERS["wait"] = False
 
-    if PARAMETERS["nodes"] > 1:
-        PARAMETERS["cores"]= max_cores_per_node
-    elif PARAMETERS["cores"] > max_cores_per_node:
+    if PARAMETERS["cores"] > max_cores_per_node:
         print("Queue '%s' has '%d' cores. You requested '%d' cores!" % (queue_name,max_cores_per_node,PARAMETERS["cores"]))
         sys.exit()
 
@@ -345,7 +358,12 @@ def main():
                         "-N", str(PARAMETERS["nodes"]),
                         "-t", str(PARAMETERS["walltime"]),
                         "--mem", str(PARAMETERS["mem"]),
-                        "-j", args[0]]) 
+                        "-J", args[0]])
+
+            for opt in PARAMETERS["slurm-options"]:
+                cmd.append(opt)
+
+            cmd.append("bash") 
 
             p = subprocess.Popen(cmd, stdin = subprocess.PIPE, stdout = subprocess.PIPE)
         else:
@@ -357,15 +375,18 @@ def main():
     fp.write("#!/bin/sh\n")
     if specific_queue:
         fp.write("#SBATCH -p %s\n" % queue_name) 
-    fp.write("#SBATCH --ntasks %i\n" % (PARAMETERS["nodes"]))
-    fp.write("#SBATCH --cpus-per-task %i\n" % (PARAMETERS["cores"]))
+    fp.write("#SBATCH --nodes %i\n" % (PARAMETERS["nodes"]))
+    fp.write("#SBATCH -c %i\n" % (PARAMETERS["cores"]))
     fp.write("#SBATCH --time %s\n" % PARAMETERS["walltime"])
     fp.write("#SBATCH --mem %s\n" % PARAMETERS["mem"])
+    for opt in PARAMETERS["slurm-options"]:
+        fp.write("#SBATCH %s\n" % opt)
     # Set name
-    fp.write("#SBATCH --job-name %s\n" % args[0])
+    fp.write("#SBATCH --job-name %s\n" % os.path.basename(args[0]))
     fp.write("\n")
-    if PARAMETERS["wait"]:
-        fp.write('if [ "$SLURM_PROCID" -ne 0 ] ; then exit 0 fi\n')
+
+    fp.write("# without this, srun will do the batch script once per node\n")
+    fp.write("[ $SLURM_PROCID -ne 0 ] && exit 0\n")
 
     prof and add_profiling_start(fp, "total")
 
@@ -418,7 +439,6 @@ def main():
 
     prof and add_profiling_end(fp, "total")
 
-
     if PARAMETERS["execute"]:
         fp.close()
 
@@ -464,6 +484,8 @@ Parameters specific to job generation
 
   -p, --profile     Adds profiling commands to the job script, which measures computation
                     time and time spent copying to/from scratch.
+
+  --sbatch=<opt>    Add '#SBATCH <opt>' to job script.
 
 Parameters specific to using the scratch folder
   -i, --input=<fp>  -i and -o may be spefified multiple types, to allow for more input

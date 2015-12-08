@@ -1,8 +1,10 @@
 #!/bin/sh
 NTASKS=`printenv SLURM_NTASKS`
 PROCID=`printenv SLURM_PROCID`
+# Make sure lines that end with EOF rather than \n still get a newline
+# Kill empty lines (the first sed produces a ton of empty lines)
 # Starting from procid take every ntasks'th line, and eval it
-sed -n "$PROCID~${NTASKS}p" $1 | \
+sed --regexp-extended 's/(.*)(\Z|$)/\1\n/' $1 | sed '/^$/d' | sed -n "$PROCID~${NTASKS}p" | \
 while read line
 do
     eval $line

@@ -5,8 +5,6 @@
 # Author: Rune Moellegaard Friborg <runef@birc.au.dk>
 # Modified by: Anders Halager <aeh@birc.au.dk>
 
-echo "qwait has been deprecated, consider using a job dependency instead" 1>&2
-
 for jobid in $@; do
 	running=1
 	i=10
